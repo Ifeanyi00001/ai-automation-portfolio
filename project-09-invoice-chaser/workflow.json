@@ -1,0 +1,546 @@
+{
+    "name": "AI Invoice & Payment Chaser",
+    "nodes": [
+        {
+            "id": "p9-n1",
+            "name": "Daily Payment Check Trigger",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "cronExpression",
+                            "cronExpression": "0 9 * * 1-5"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p9-n2",
+            "name": "Xero - Get Overdue Invoices",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.xero.com/api.xro/2.0/Invoices",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{XERO_ACCESS_TOKEN}}"
+                        },
+                        {
+                            "name": "Xero-tenant-id",
+                            "value": "{{XERO_TENANT_ID}}"
+                        },
+                        {
+                            "name": "Accept",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "Statuses",
+                            "value": "AUTHORISED"
+                        },
+                        {
+                            "name": "where",
+                            "value": "Type==\"ACCREC\" AND AmountDue>0 AND DueDate<DateTime.UtcNow"
+                        },
+                        {
+                            "name": "order",
+                            "value": "DueDate ASC"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p9-n3",
+            "name": "Extract & Enrich Invoice List",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const invoices = $input.item.json.Invoices || [];\nconst today = new Date();\n\nconst enriched = invoices.map(inv => {\n  const dueDate = new Date(inv.DueDate.replace('/Date(', '').replace('+0000)/', '').replace(')/', ''));\n  const daysOverdue = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));\n  \n  let tier, urgency, emoji;\n  if (daysOverdue <= 7) { tier = 1; urgency = 'friendly'; emoji = ':bell:'; }\n  else if (daysOverdue <= 30) { tier = 2; urgency = 'firm'; emoji = ':warning:'; }\n  else { tier = 3; urgency = 'final'; emoji = ':rotating_light:'; }\n\n  return {\n    invoiceId: inv.InvoiceID,\n    invoiceNumber: inv.InvoiceNumber,\n    reference: inv.Reference || '',\n    contactName: inv.Contact?.Name || 'Unknown',\n    contactEmail: inv.Contact?.EmailAddress || '',\n    amountDue: inv.AmountDue,\n    currency: inv.CurrencyCode || 'USD',\n    dueDate: dueDate.toISOString().split('T')[0],\n    daysOverdue,\n    tier,\n    urgency,\n    emoji,\n    invoiceUrl: `https://invoicing.xero.com/view/${inv.InvoiceID}`\n  };\n}).filter(inv => inv.contactEmail && inv.amountDue > 0);\n\nreturn enriched.map(inv => ({ json: inv }));"
+            }
+        },
+        {
+            "id": "p9-n4",
+            "name": "Skip Already Chased Today",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.airtable.com/v0/{{AIRTABLE_BASE_ID}}/{{AIRTABLE_CHASE_TABLE}}",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{AIRTABLE_API_KEY}}"
+                        }
+                    ]
+                },
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "filterByFormula",
+                            "value": "=AND({Invoice ID}='{{ $json.invoiceId }}', IS_SAME({Last Chased}, TODAY(), 'day'))"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p9-n5",
+            "name": "Filter - Not Chased Today",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.records?.length }}",
+                            "rightValue": 0,
+                            "operator": {
+                                "type": "number",
+                                "operation": "equals"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p9-n6",
+            "name": "Claude - Write Chase Email",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1100,
+                -120
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 600, temperature: 0.4, system: 'You are a professional accounts receivable specialist who writes firm but respectful payment reminder emails. Your emails are polite but clear. Never be aggressive or threatening. Always make it easy for the client to pay. Sign off as The Accounts Team.', messages: [{ role: 'user', content: 'Write a payment reminder email for:\\n\\nCLIENT: ' + $('Extract & Enrich Invoice List').item.json.contactName + '\\nINVOICE #: ' + $('Extract & Enrich Invoice List').item.json.invoiceNumber + '\\nAMOUNT DUE: ' + $('Extract & Enrich Invoice List').item.json.currency + ' ' + $('Extract & Enrich Invoice List').item.json.amountDue + '\\nORIGINAL DUE DATE: ' + $('Extract & Enrich Invoice List').item.json.dueDate + '\\nDAYS OVERDUE: ' + $('Extract & Enrich Invoice List').item.json.daysOverdue + '\\nURGENCY TIER: ' + $('Extract & Enrich Invoice List').item.json.urgency + '\\nPAYMENT LINK: ' + $('Extract & Enrich Invoice List').item.json.invoiceUrl + '\\n\\nURGENCY LEVELS:\\n- friendly (1-7 days): Light reminder, assume it slipped their mind, offer help\\n- firm (8-30 days): Clear and direct, ask if there are any issues causing the delay, set a payment deadline of 5 business days\\n- final (31+ days): Final notice before account is referred for further action, 48 hours to pay or contact us\\n\\nReturn JSON only:\\n{\"subject\": \"...\", \"body\": \"...\"}' }] }) }}"
+            }
+        },
+        {
+            "id": "p9-n7",
+            "name": "Parse Email Content",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                -120
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst invoice = $('Extract & Enrich Invoice List').item.json;\nlet emailData;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  emailData = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  emailData = {\n    subject: `Payment Reminder: Invoice ${invoice.invoiceNumber} — ${invoice.daysOverdue} Days Overdue`,\n    body: `Dear ${invoice.contactName},\\n\\nThis is a reminder that invoice ${invoice.invoiceNumber} for ${invoice.currency} ${invoice.amountDue} was due on ${invoice.dueDate}.\\n\\nPlease arrange payment at your earliest convenience: ${invoice.invoiceUrl}\\n\\nThank you,\\nThe Accounts Team`\n  };\n}\nreturn {\n  json: {\n    ...invoice,\n    emailSubject: emailData.subject,\n    emailBody: emailData.body,\n    chasedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p9-n8",
+            "name": "Gmail - Send Chase Email",
+            "type": "n8n-nodes-base.gmail",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                -200
+            ],
+            "parameters": {
+                "operation": "send",
+                "toList": "={{ $json.contactEmail }}",
+                "subject": "={{ $json.emailSubject }}",
+                "message": "={{ $json.emailBody }}",
+                "options": {}
+            }
+        },
+        {
+            "id": "p9-n9",
+            "name": "Tier 2+3 Gate - Send SMS",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.tier }}",
+                            "rightValue": 1,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gt"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p9-n10",
+            "name": "Twilio - Send SMS Chase",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                -60
+            ],
+            "parameters": {
+                "url": "=https://api.twilio.com/2010-04-01/Accounts/{{TWILIO_ACCOUNT_SID}}/Messages.json",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Basic {{TWILIO_BASE64_AUTH}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "form-urlencoded",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "To",
+                            "value": "={{ $json.contactPhone || '{{DEFAULT_PHONE}}' }}"
+                        },
+                        {
+                            "name": "From",
+                            "value": "{{TWILIO_PHONE_NUMBER}}"
+                        },
+                        {
+                            "name": "Body",
+                            "value": "={{ '[URGENT] Hi ' + $json.contactName.split(' ')[0] + ', invoice ' + $json.invoiceNumber + ' for ' + $json.currency + ' ' + $json.amountDue + ' is ' + $json.daysOverdue + ' days overdue. Pay now: ' + $json.invoiceUrl + '. Reply STOP to unsubscribe.' }}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p9-n11",
+            "name": "Tier 3 Gate - Escalate to Slack",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $('Extract & Enrich Invoice List').item.json.tier }}",
+                            "rightValue": 3,
+                            "operator": {
+                                "type": "number",
+                                "operation": "equals"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p9-n12",
+            "name": "Slack - Tier 3 Escalation to Finance Team",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                -120
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "finance-escalations"
+                },
+                "text": "=:rotating_light: *OVERDUE INVOICE — FINAL NOTICE SENT*\n\n*Client:* {{ $('Extract & Enrich Invoice List').item.json.contactName }}\n*Email:* {{ $('Extract & Enrich Invoice List').item.json.contactEmail }}\n*Invoice #:* {{ $('Extract & Enrich Invoice List').item.json.invoiceNumber }}\n*Amount:* {{ $('Extract & Enrich Invoice List').item.json.currency }} {{ $('Extract & Enrich Invoice List').item.json.amountDue }}\n*Days Overdue:* {{ $('Extract & Enrich Invoice List').item.json.daysOverdue }}\n*Due Date Was:* {{ $('Extract & Enrich Invoice List').item.json.dueDate }}\n\nFinal notice email + SMS sent. If no payment in 48hrs, consider referring to collections or legal.\n\n:link: <{{ $('Extract & Enrich Invoice List').item.json.invoiceUrl }}|View Invoice in Xero>",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p9-n13",
+            "name": "Airtable - Update Chase Log",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                0
+            ],
+            "parameters": {
+                "operation": "create",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_CHASE_TABLE}}",
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Invoice ID": "={{ $('Extract & Enrich Invoice List').item.json.invoiceId }}",
+                        "Invoice Number": "={{ $('Extract & Enrich Invoice List').item.json.invoiceNumber }}",
+                        "Client Name": "={{ $('Extract & Enrich Invoice List').item.json.contactName }}",
+                        "Client Email": "={{ $('Extract & Enrich Invoice List').item.json.contactEmail }}",
+                        "Amount Due": "={{ $('Extract & Enrich Invoice List').item.json.amountDue }}",
+                        "Currency": "={{ $('Extract & Enrich Invoice List').item.json.currency }}",
+                        "Days Overdue": "={{ $('Extract & Enrich Invoice List').item.json.daysOverdue }}",
+                        "Tier": "={{ $('Extract & Enrich Invoice List').item.json.tier }}",
+                        "Urgency": "={{ $('Extract & Enrich Invoice List').item.json.urgency }}",
+                        "Email Sent": "={{ 'Yes' }}",
+                        "SMS Sent": "={{ $('Extract & Enrich Invoice List').item.json.tier > 1 ? 'Yes' : 'No' }}",
+                        "Last Chased": "={{ new Date().toISOString().split('T')[0] }}"
+                    }
+                }
+            }
+        },
+        {
+            "id": "p9-n14",
+            "name": "Aggregate Daily Summary",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                0
+            ],
+            "parameters": {
+                "jsCode": "// This node collects all processed invoices and produces a daily summary\n// In a real implementation, use a persistent store; here we summarize the current run\nconst invoice = $('Extract & Enrich Invoice List').item.json;\nreturn {\n  json: {\n    summary: `Chased invoice ${invoice.invoiceNumber} — ${invoice.contactName} — ${invoice.currency} ${invoice.amountDue} — ${invoice.daysOverdue} days overdue (Tier ${invoice.tier})`,\n    tier: invoice.tier,\n    amount: invoice.amountDue,\n    currency: invoice.currency\n  }\n};"
+            }
+        },
+        {
+            "id": "p9-n15",
+            "name": "Slack - Daily AR Summary",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2860,
+                0
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "finance-team"
+                },
+                "text": "=:moneybag: *Daily Invoice Chase Complete*\n\n{{ $json.summary }}\n\n_AI chase system ran at {{ new Date().toLocaleString() }}_\n_Check Airtable for full log_",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Daily Payment Check Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Xero - Get Overdue Invoices",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Xero - Get Overdue Invoices": {
+            "main": [
+                [
+                    {
+                        "node": "Extract & Enrich Invoice List",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract & Enrich Invoice List": {
+            "main": [
+                [
+                    {
+                        "node": "Skip Already Chased Today",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Skip Already Chased Today": {
+            "main": [
+                [
+                    {
+                        "node": "Filter - Not Chased Today",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Filter - Not Chased Today": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Write Chase Email",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        },
+        "Claude - Write Chase Email": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Email Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Email Content": {
+            "main": [
+                [
+                    {
+                        "node": "Gmail - Send Chase Email",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Tier 2+3 Gate - Send SMS",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Tier 2+3 Gate - Send SMS": {
+            "main": [
+                [
+                    {
+                        "node": "Twilio - Send SMS Chase",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        },
+        "Twilio - Send SMS Chase": {
+            "main": [
+                [
+                    {
+                        "node": "Tier 3 Gate - Escalate to Slack",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Gmail - Send Chase Email": {
+            "main": [
+                [
+                    {
+                        "node": "Tier 3 Gate - Escalate to Slack",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Tier 3 Gate - Escalate to Slack": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Tier 3 Escalation to Finance Team",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        },
+        "Slack - Tier 3 Escalation to Finance Team": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Update Chase Log",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Update Chase Log": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate Daily Summary",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Aggregate Daily Summary": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Daily AR Summary",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
