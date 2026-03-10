@@ -1,0 +1,617 @@
+{
+    "name": "AI Financial Market Intelligence & Investment Research Synthesiser",
+    "nodes": [
+        {
+            "id": "p15-n1",
+            "name": "Daily Schedule - Pre-Market 6am Mon-Fri",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1.2,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "cronExpression",
+                            "expression": "0 6 * * 1-5"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p15-n2",
+            "name": "Airtable - Fetch Watchlist",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "operation": "list",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_WATCHLIST_TABLE}}",
+                "filterByFormula": "AND({Active}=1, {Track Today}=1)",
+                "returnAll": true
+            }
+        },
+        {
+            "id": "p15-n3",
+            "name": "Split Watchlist into Items",
+            "type": "n8n-nodes-base.splitOut",
+            "typeVersion": 1,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "fieldToSplitOut": "fields",
+                "options": {}
+            }
+        },
+        {
+            "id": "p15-n4",
+            "name": "Alpha Vantage - Fetch Quote & Fundamentals",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "url": "=https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={{ $json.Ticker }}&apikey={{ALPHA_VANTAGE_API_KEY}}",
+                "method": "GET"
+            }
+        },
+        {
+            "id": "p15-n5",
+            "name": "Alpha Vantage - Fetch Company Overview",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "url": "=https://www.alphavantage.co/query?function=OVERVIEW&symbol={{ $('Split Watchlist into Items').item.json.Ticker }}&apikey={{ALPHA_VANTAGE_API_KEY}}",
+                "method": "GET"
+            }
+        },
+        {
+            "id": "p15-n6",
+            "name": "NewsAPI - Fetch Company News",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "url": "https://newsapi.org/v2/everything",
+                "method": "GET",
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "value": "={{ $('Split Watchlist into Items').item.json.CompanyName + ' OR ' + $('Split Watchlist into Items').item.json.Ticker }}"
+                        },
+                        {
+                            "name": "language",
+                            "value": "en"
+                        },
+                        {
+                            "name": "sortBy",
+                            "value": "publishedAt"
+                        },
+                        {
+                            "name": "pageSize",
+                            "value": "5"
+                        },
+                        {
+                            "name": "from",
+                            "value": "={{ new Date(Date.now() - 2*24*60*60*1000).toISOString().split('T')[0] }}"
+                        },
+                        {
+                            "name": "apiKey",
+                            "value": "{{NEWS_API_KEY}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p15-n7",
+            "name": "Jina.ai - Extract Top News Article",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1320,
+                0
+            ],
+            "parameters": {
+                "url": "=https://r.jina.ai/{{ ($('NewsAPI - Fetch Company News').item.json.articles || [])[0]?.url || 'https://finance.yahoo.com/quote/' + $('Split Watchlist into Items').item.json.Ticker }}",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{JINA_API_KEY}}"
+                        },
+                        {
+                            "name": "X-Return-Format",
+                            "value": "markdown"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p15-n8",
+            "name": "Merge & Calculate Technical Signals",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const ticker = $('Split Watchlist into Items').item.json;\nconst quote = $('Alpha Vantage - Fetch Quote & Fundamentals').item.json['Global Quote'] || {};\nconst overview = $('Alpha Vantage - Fetch Company Overview').item.json || {};\nconst newsItems = $('NewsAPI - Fetch Company News').item.json.articles || [];\nconst articleContent = $input.item.json || '';\n\n// Parse price data\nconst currentPrice = parseFloat(quote['05. price'] || 0);\nconst prevClose = parseFloat(quote['08. previous close'] || 0);\nconst priceChange = parseFloat(quote['09. change'] || 0);\nconst priceChangePct = parseFloat(quote['10. change percent']?.replace('%', '') || 0);\nconst volume = parseInt(quote['06. volume'] || 0);\nconst avgVolume = parseInt(quote['07. latest trading day'] || 0);\nconst high52 = parseFloat(quote['03. high'] || 0);\nconst low52 = parseFloat(quote['04. low'] || 0);\n\n// Fundamental data from overview\nconst peRatio = parseFloat(overview.PERatio || 0);\nconst eps = parseFloat(overview.EPS || 0);\nconst pbRatio = parseFloat(overview.PriceToBookRatio || 0);\nconst dividendYield = parseFloat(overview.DividendYield || 0);\nconst marketCap = overview.MarketCapitalization || '0';\nconst sector = overview.Sector || ticker.Sector || 'Unknown';\nconst beta = parseFloat(overview.Beta || 1);\nconst analystTarget = parseFloat(overview.AnalystTargetPrice || 0);\nconst forwardPE = parseFloat(overview.ForwardPE || 0);\nconst profitMargin = parseFloat(overview.ProfitMargin || 0);\nconst revenueGrowthYoY = parseFloat(overview.QuarterlyRevenueGrowthYOY || 0);\nconst earningsGrowthYoY = parseFloat(overview.QuarterlyEarningsGrowthYOY || 0);\n\n// Price vs analyst target\nconst upsidePotential = analystTarget > 0 ? ((analystTarget - currentPrice) / currentPrice * 100).toFixed(1) : 'N/A';\n\n// Momentum signal (proximity to 52-week high)\nconst from52WeekHigh = high52 > 0 ? ((currentPrice - high52) / high52 * 100).toFixed(1) : '0';\nconst from52WeekLow = low52 > 0 ? ((currentPrice - low52) / low52 * 100).toFixed(1) : '0';\n\n// Simple technical signal\nlet technicalSignal = 'NEUTRAL';\nif (priceChangePct > 2 && parseFloat(from52WeekHigh) > -10) technicalSignal = 'BULLISH';\nelse if (priceChangePct < -2 && parseFloat(from52WeekHigh) < -20) technicalSignal = 'BEARISH';\n\n// Value signal\nlet valuationSignal = 'FAIR';\nif (peRatio > 0 && peRatio < 15 && profitMargin > 0.1) valuationSignal = 'UNDERVALUED';\nelse if (peRatio > 35 || (peRatio > 25 && profitMargin < 0.05)) valuationSignal = 'OVERVALUED';\n\n// News headlines\nconst headlines = newsItems.slice(0, 3).map(a => ({ title: a.title, source: a.source?.name, url: a.url, publishedAt: a.publishedAt }));\n\nreturn {\n  json: {\n    ticker: ticker.Ticker,\n    companyName: ticker.CompanyName || overview.Name || ticker.Ticker,\n    sector,\n    currentPrice,\n    prevClose,\n    priceChange,\n    priceChangePct,\n    volume,\n    high52,\n    low52,\n    from52WeekHigh,\n    from52WeekLow,\n    peRatio,\n    forwardPE,\n    eps,\n    pbRatio,\n    dividendYield,\n    beta,\n    analystTarget,\n    upsidePotential,\n    profitMargin: (profitMargin * 100).toFixed(1),\n    revenueGrowthYoY: (revenueGrowthYoY * 100).toFixed(1),\n    earningsGrowthYoY: (earningsGrowthYoY * 100).toFixed(1),\n    marketCap,\n    technicalSignal,\n    valuationSignal,\n    headlines,\n    articleContent: typeof articleContent === 'string' ? articleContent.substring(0, 3000) : JSON.stringify(articleContent).substring(0, 3000),\n    analysedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p15-n9",
+            "name": "Claude - Investment Thesis & Sentiment Analysis",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 1500, temperature: 0.2, system: 'You are a CFA-level investment analyst at a tier-1 fund. You synthesise technical signals, fundamental data, and news sentiment into actionable investment theses. Be contrarian when data warrants it. Be honest about uncertainty. Avoid hype. Use specific numbers. Return only valid JSON. Add a disclaimer that this is not financial advice.', messages: [{ role: 'user', content: 'Analyse this equity and generate an investment thesis.\\n\\nTICKER: ' + $json.ticker + '\\nCOMPANY: ' + $json.companyName + '\\nSECTOR: ' + $json.sector + '\\n\\nPRICE DATA:\\nCurrent Price: $' + $json.currentPrice + '\\nDay Change: ' + $json.priceChangePct + '%\\n52W High: $' + $json.high52 + ' (currently ' + $json.from52WeekHigh + '% from high)\\n52W Low: $' + $json.low52 + ' (currently ' + $json.from52WeekLow + '% from low)\\nAnalyst Target: $' + $json.analystTarget + ' (' + $json.upsidePotential + '% upside)\\n\\nFUNDAMENTALS:\\nP/E Ratio: ' + $json.peRatio + 'x (Forward: ' + $json.forwardPE + 'x)\\nEPS: $' + $json.eps + '\\nP/B Ratio: ' + $json.pbRatio + 'x\\nDividend Yield: ' + ($json.dividendYield*100).toFixed(2) + '%\\nBeta: ' + $json.beta + '\\nProfit Margin: ' + $json.profitMargin + '%\\nRevenue Growth YoY: ' + $json.revenueGrowthYoY + '%\\nEarnings Growth YoY: ' + $json.earningsGrowthYoY + '%\\nMarket Cap: $' + $json.marketCap + '\\n\\nTECHNICAL SIGNAL: ' + $json.technicalSignal + '\\nVALUATION SIGNAL: ' + $json.valuationSignal + '\\n\\nRECENT NEWS:\\n' + $json.headlines.map(h => '• ' + h.title + ' (' + h.source + ')').join('\\n') + '\\n\\nARTICLE CONTENT (top story):\\n' + $json.articleContent + '\\n\\nReturn ONLY this JSON:\\n{\\n  \"recommendation\": \"STRONG BUY|BUY|HOLD|SELL|STRONG SELL\",\\n  \"confidenceLevel\": \"HIGH|MEDIUM|LOW\",\\n  \"investmentThesis\": \"3-4 sentence institutional-quality investment thesis\",\\n  \"bullCase\": \"2-3 sentence bull case with specific price/metric targets\",\\n  \"bearCase\": \"2-3 sentence bear case with specific risk factors\",\\n  \"newsSentiment\": \"VERY POSITIVE|POSITIVE|NEUTRAL|NEGATIVE|VERY NEGATIVE\",\\n  \"newsSentimentReason\": \"1 sentence explanation of news sentiment\",\\n  \"keyRisks\": [\"top 3 risks to watch\"],\\n  \"keyTriggers\": [\"top 3 catalysts that would change thesis\"],\\n  \"priceTarget12m\": number_or_null,\\n  \"stopLossLevel\": number_or_null,\\n  \"oneLineSummary\": \"max 15 words: the single most important thing to know about this stock today\"\\n}' }] }) }}"
+            }
+        },
+        {
+            "id": "p15-n10",
+            "name": "Parse Investment Analysis",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst data = $('Merge & Calculate Technical Signals').item.json;\nlet thesis;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  thesis = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  thesis = { recommendation: 'HOLD', confidenceLevel: 'LOW', investmentThesis: 'Analysis failed — manual review required.', bullCase: '', bearCase: '', newsSentiment: 'NEUTRAL', newsSentimentReason: '', keyRisks: [], keyTriggers: [], priceTarget12m: null, stopLossLevel: null, oneLineSummary: 'Manual review required' };\n}\n\nconst recEmoji = { 'STRONG BUY': '🟢🟢', 'BUY': '🟢', 'HOLD': '🟡', 'SELL': '🔴', 'STRONG SELL': '🔴🔴' };\n\nreturn {\n  json: {\n    ...data,\n    recommendation: thesis.recommendation || 'HOLD',\n    recEmoji: recEmoji[thesis.recommendation] || '🟡',\n    confidenceLevel: thesis.confidenceLevel || 'LOW',\n    investmentThesis: thesis.investmentThesis || '',\n    bullCase: thesis.bullCase || '',\n    bearCase: thesis.bearCase || '',\n    newsSentiment: thesis.newsSentiment || 'NEUTRAL',\n    newsSentimentReason: thesis.newsSentimentReason || '',\n    keyRisks: thesis.keyRisks || [],\n    keyTriggers: thesis.keyTriggers || [],\n    priceTarget12m: thesis.priceTarget12m || null,\n    stopLossLevel: thesis.stopLossLevel || null,\n    oneLineSummary: thesis.oneLineSummary || ''\n  }\n};"
+            }
+        },
+        {
+            "id": "p15-n11",
+            "name": "OpenAI - Embed Research for Knowledge Base",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2200,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.openai.com/v1/embeddings",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{OPENAI_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'text-embedding-3-small', input: $json.ticker + ' ' + $json.companyName + ': ' + $json.recommendation + '. ' + $json.investmentThesis + ' ' + $json.oneLineSummary }) }}"
+            }
+        },
+        {
+            "id": "p15-n12",
+            "name": "Pinecone - Store Research History",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2420,
+                0
+            ],
+            "parameters": {
+                "url": "https://{{PINECONE_INDEX_HOST}}/upsert",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Api-Key",
+                            "value": "{{PINECONE_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ vectors: [{ id: $('Parse Investment Analysis').item.json.ticker + '-' + new Date().toISOString().split('T')[0], values: $json.data[0].embedding, metadata: { ticker: $('Parse Investment Analysis').item.json.ticker, companyName: $('Parse Investment Analysis').item.json.companyName, recommendation: $('Parse Investment Analysis').item.json.recommendation, currentPrice: $('Parse Investment Analysis').item.json.currentPrice, priceTarget12m: $('Parse Investment Analysis').item.json.priceTarget12m, sector: $('Parse Investment Analysis').item.json.sector, newsSentiment: $('Parse Investment Analysis').item.json.newsSentiment, analysedAt: $('Parse Investment Analysis').item.json.analysedAt, oneLineSummary: $('Parse Investment Analysis').item.json.oneLineSummary } }], namespace: 'market-research' }) }}"
+            }
+        },
+        {
+            "id": "p15-n13",
+            "name": "Airtable - Log Daily Analysis",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                0
+            ],
+            "parameters": {
+                "operation": "create",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_RESEARCH_LOG_TABLE}}",
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Date": "={{ new Date().toISOString().split('T')[0] }}",
+                        "Ticker": "={{ $('Parse Investment Analysis').item.json.ticker }}",
+                        "Company": "={{ $('Parse Investment Analysis').item.json.companyName }}",
+                        "Sector": "={{ $('Parse Investment Analysis').item.json.sector }}",
+                        "Price": "={{ $('Parse Investment Analysis').item.json.currentPrice }}",
+                        "Day Change %": "={{ $('Parse Investment Analysis').item.json.priceChangePct }}",
+                        "Recommendation": "={{ $('Parse Investment Analysis').item.json.recommendation }}",
+                        "Confidence": "={{ $('Parse Investment Analysis').item.json.confidenceLevel }}",
+                        "P/E Ratio": "={{ $('Parse Investment Analysis').item.json.peRatio }}",
+                        "Analyst Target": "={{ $('Parse Investment Analysis').item.json.analystTarget }}",
+                        "AI Price Target 12m": "={{ $('Parse Investment Analysis').item.json.priceTarget12m }}",
+                        "News Sentiment": "={{ $('Parse Investment Analysis').item.json.newsSentiment }}",
+                        "One Line Summary": "={{ $('Parse Investment Analysis').item.json.oneLineSummary }}",
+                        "Technical Signal": "={{ $('Parse Investment Analysis').item.json.technicalSignal }}",
+                        "Valuation Signal": "={{ $('Parse Investment Analysis').item.json.valuationSignal }}"
+                    }
+                }
+            }
+        },
+        {
+            "id": "p15-n14",
+            "name": "Aggregate All Analyses",
+            "type": "n8n-nodes-base.aggregate",
+            "typeVersion": 1,
+            "position": [
+                2860,
+                0
+            ],
+            "parameters": {
+                "aggregate": "aggregateAllItemData",
+                "options": {}
+            }
+        },
+        {
+            "id": "p15-n15",
+            "name": "Claude - Generate Daily Briefing Report",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                3080,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 2500, temperature: 0.4, system: 'You are the Chief Investment Officer of a boutique research house writing the daily pre-market briefing for high-net-worth clients. Write with authority, precision, and insight. Surface non-obvious connections between holdings. Return only valid JSON.', messages: [{ role: 'user', content: 'Generate today\\'s institutional-quality pre-market briefing from these stock analyses.\\n\\n' + JSON.stringify($json.data.map(d => ({ ticker: d.ticker, company: d.companyName, sector: d.sector, price: '$' + d.currentPrice, change: d.priceChangePct + '%', recommendation: d.recommendation, thesis: d.investmentThesis, sentiment: d.newsSentiment, summary: d.oneLineSummary, priceTarget: d.priceTarget12m }))) + '\\n\\nReturn ONLY this JSON:\\n{\\n  \"briefingDate\": \"' + new Date().toLocaleDateString(\\'en-AU\\', {weekday:\\'long\\', year:\\'numeric\\', month:\\'long\\', day:\\'numeric\\'}) + '\",\\n  \"marketOutlook\": \"RISK-ON|RISK-OFF|MIXED\",\\n  \"executiveOverview\": \"3-4 sentence macro-level synthesis of what the watchlist data is telling us about market conditions\",\\n  \"topPick\": { \"ticker\": \"...\", \"reason\": \"2 sentences why this is today\\'s top conviction call\" },\\n  \"avoidToday\": { \"ticker\": \"...\", \"reason\": \"2 sentences why to avoid or trim today\" },\\n  \"themeOfTheDay\": \"The dominant theme or sector rotation pattern visible across the watchlist\",\\n  \"stockSummaries\": [{ \"ticker\": \"...\", \"headline\": \"1 sentence\", \"recommendation\": \"...\", \"confidence\": \"...\" }],\\n  \"keyRisksToday\": [\"top 3 macro or market risks to monitor today\"],\\n  \"actionItems\": [\"specific portfolio actions to consider based on today\\'s analysis\"],\\n  \"closingNote\": \"1-2 sentence thoughtful closing note — the one insight investors should carry through the trading day\"\\n}' }] }) }}"
+            }
+        },
+        {
+            "id": "p15-n16",
+            "name": "Parse & Format Final Briefing",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                3300,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst allData = $('Aggregate All Analyses').item.json.data || [];\nlet briefing;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  briefing = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  briefing = { briefingDate: new Date().toLocaleDateString(), marketOutlook: 'MIXED', executiveOverview: 'Briefing parse error — please review individual analyses.', topPick: { ticker: '—', reason: '' }, avoidToday: { ticker: '—', reason: '' }, themeOfTheDay: 'Manual review needed', stockSummaries: [], keyRisksToday: [], actionItems: [], closingNote: '' };\n}\n\nconst outlookEmoji = { 'RISK-ON': ':green_circle:', 'RISK-OFF': ':red_circle:', 'MIXED': ':yellow_circle:' };\n\n// Build full Markdown report\nconst report = `# 📊 Daily Investment Briefing\\n${briefing.briefingDate}\\n\\n---\\n\\n## Market Outlook: ${outlookEmoji[briefing.marketOutlook] || ''} ${briefing.marketOutlook}\\n\\n${briefing.executiveOverview}\\n\\n---\\n\\n## 🏆 Today's Top Pick: ${briefing.topPick?.ticker}\\n\\n${briefing.topPick?.reason}\\n\\n## ⚠️ Avoid Today: ${briefing.avoidToday?.ticker}\\n\\n${briefing.avoidToday?.reason}\\n\\n---\\n\\n## 📰 Theme of the Day\\n\\n${briefing.themeOfTheDay}\\n\\n---\\n\\n## Stock Summaries\\n\\n${ (briefing.stockSummaries || []).map(s => `### ${s.ticker} — ${s.recommendation} (${s.confidence} confidence)\\n${s.headline}`).join('\\n\\n') }\\n\\n---\\n\\n## Key Risks to Monitor\\n\\n${ (briefing.keyRisksToday || []).map((r,i) => `${i+1}. ${r}`).join('\\n') }\\n\\n---\\n\\n## Today's Action Items\\n\\n${ (briefing.actionItems || []).map(a => `- ${a}`).join('\\n') }\\n\\n---\\n\\n> *${briefing.closingNote}*\\n\\n---\\n\\n*DISCLAIMER: This briefing is generated by AI and is for informational purposes only. It does not constitute financial advice. Past performance is not indicative of future results. All investment decisions should be made in consultation with a licensed financial adviser.*`;\n\nreturn {\n  json: {\n    ...briefing,\n    outlookEmoji: outlookEmoji[briefing.marketOutlook] || ':yellow_circle:',\n    reportContent: report,\n    stockCount: allData.length,\n    generatedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p15-n17",
+            "name": "Google Docs - Create Research Report",
+            "type": "n8n-nodes-base.googleDocs",
+            "typeVersion": 2,
+            "position": [
+                3520,
+                -180
+            ],
+            "parameters": {
+                "operation": "create",
+                "title": "={{ 'Daily Investment Briefing — ' + new Date().toISOString().split('T')[0] }}",
+                "folderId": "{{GOOGLE_DRIVE_RESEARCH_FOLDER_ID}}",
+                "content": "={{ $json.reportContent }}"
+            }
+        },
+        {
+            "id": "p15-n18",
+            "name": "Gmail - Send Investor Briefing Email",
+            "type": "n8n-nodes-base.gmail",
+            "typeVersion": 2,
+            "position": [
+                3520,
+                0
+            ],
+            "parameters": {
+                "operation": "send",
+                "toList": "{{INVESTOR_EMAIL_LIST}}",
+                "subject": "={{ '📊 Pre-Market Briefing — ' + $json.briefingDate + ' — Outlook: ' + $json.marketOutlook }}",
+                "message": "={{ '<h1>Daily Investment Briefing</h1><h2>' + $json.briefingDate + '</h2><h3>Market Outlook: ' + $json.marketOutlook + '</h3><p>' + $json.executiveOverview + '</p><h3>🏆 Top Pick Today: ' + $json.topPick?.ticker + '</h3><p>' + $json.topPick?.reason + '</p><h3>⚠️ Avoid: ' + $json.avoidToday?.ticker + '</h3><p>' + $json.avoidToday?.reason + '</p><h3>Theme of the Day</h3><p>' + $json.themeOfTheDay + '</p><h3>Key Risks</h3><ul>' + ($json.keyRisksToday || []).map(r => '<li>' + r + '</li>').join('') + '</ul><h3>Action Items</h3><ul>' + ($json.actionItems || []).map(a => '<li>' + a + '</li>').join('') + '</ul><blockquote>' + $json.closingNote + '</blockquote><hr><small>Disclaimer: AI-generated briefing for informational purposes only. Not financial advice. Consult a licensed financial adviser before making investment decisions.</small>' }}",
+                "options": {}
+            }
+        },
+        {
+            "id": "p15-n19",
+            "name": "Slack - Morning Market Roundup",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                3520,
+                180
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "market-intelligence"
+                },
+                "text": "={{ $json.outlookEmoji + ' *Pre-Market Briefing — ' + $json.briefingDate + '*\\n*Market Outlook:* ' + $json.marketOutlook + '\\n\\n' + $json.executiveOverview + '\\n\\n:trophy: *Top Pick:* ' + $json.topPick?.ticker + ' — ' + $json.topPick?.reason + '\\n\\n:warning: *Avoid:* ' + $json.avoidToday?.ticker + ' — ' + $json.avoidToday?.reason + '\\n\\n:bulb: *Theme:* ' + $json.themeOfTheDay + '\\n\\n*Stock Snapshot:*\\n' + ($json.stockSummaries || []).map(s => s.ticker + ': ' + s.recommendation + ' — ' + s.headline).join('\\n') + '\\n\\n*Key Risks:*\\n' + ($json.keyRisksToday || []).map(r => '• ' + r).join('\\n') + '\\n\\n_' + $json.closingNote + '_\\n\\n_' + $json.stockCount + ' stocks analysed • Full report in Google Drive_' }}",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Daily Schedule - Pre-Market 6am Mon-Fri": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Fetch Watchlist",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Fetch Watchlist": {
+            "main": [
+                [
+                    {
+                        "node": "Split Watchlist into Items",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Watchlist into Items": {
+            "main": [
+                [
+                    {
+                        "node": "Alpha Vantage - Fetch Quote & Fundamentals",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Alpha Vantage - Fetch Quote & Fundamentals": {
+            "main": [
+                [
+                    {
+                        "node": "Alpha Vantage - Fetch Company Overview",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Alpha Vantage - Fetch Company Overview": {
+            "main": [
+                [
+                    {
+                        "node": "NewsAPI - Fetch Company News",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "NewsAPI - Fetch Company News": {
+            "main": [
+                [
+                    {
+                        "node": "Jina.ai - Extract Top News Article",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Jina.ai - Extract Top News Article": {
+            "main": [
+                [
+                    {
+                        "node": "Merge & Calculate Technical Signals",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Merge & Calculate Technical Signals": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Investment Thesis & Sentiment Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Investment Thesis & Sentiment Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Investment Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Investment Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "OpenAI - Embed Research for Knowledge Base",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "OpenAI - Embed Research for Knowledge Base": {
+            "main": [
+                [
+                    {
+                        "node": "Pinecone - Store Research History",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Pinecone - Store Research History": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Log Daily Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Log Daily Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "Aggregate All Analyses",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Aggregate All Analyses": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Generate Daily Briefing Report",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Generate Daily Briefing Report": {
+            "main": [
+                [
+                    {
+                        "node": "Parse & Format Final Briefing",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse & Format Final Briefing": {
+            "main": [
+                [
+                    {
+                        "node": "Google Docs - Create Research Report",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Gmail - Send Investor Briefing Email",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Slack - Morning Market Roundup",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
