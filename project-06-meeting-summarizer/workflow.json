@@ -1,0 +1,456 @@
+{
+    "name": "Ghost-in-the-C-Suite Meeting Summarizer",
+    "nodes": [
+        {
+            "id": "p6-n1",
+            "name": "Fireflies Webhook - Meeting Ended",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "webhookId": "fireflies-meeting-end",
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "meeting-ended",
+                "responseMode": "lastNode",
+                "options": {}
+            }
+        },
+        {
+            "id": "p6-n2",
+            "name": "Validate Fireflies Payload",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const body = $input.item.json.body || $input.item.json;\nconst meetingId = body.meetingId || body.id || body.transcriptId;\nconst title = body.title || body.meetingTitle || 'Untitled Meeting';\nconst date = body.date || body.startTime || new Date().toISOString();\nconst duration = body.duration || body.meetingDuration || 0;\nconst attendees = body.attendees || body.participants || [];\n\nif (!meetingId) throw new Error('No meetingId in Fireflies webhook payload');\n\nreturn { json: { meetingId, title, date, duration, attendees } };"
+            }
+        },
+        {
+            "id": "p6-n3",
+            "name": "Fireflies - Fetch Full Transcript",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.fireflies.ai/graphql",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{FIREFLIES_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ query: `query { transcript(id: \"${$json.meetingId}\") { id title date duration sentences { index speaker_name raw_words start_time end_time } summary { action_items outline short_summary keywords } } }` }) }}"
+            }
+        },
+        {
+            "id": "p6-n4",
+            "name": "Extract Transcript Text",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const data = $input.item.json.data?.transcript;\nif (!data) throw new Error('Transcript not found in Fireflies response');\n\n// Build readable transcript\nconst sentences = data.sentences || [];\nconst fullTranscript = sentences.map(s => `[${s.speaker_name}]: ${s.raw_words}`).join('\\n');\n\n// Get attendee names from speakers\nconst speakers = [...new Set(sentences.map(s => s.speaker_name).filter(Boolean))];\n\n// Get Fireflies built-in summary if available\nconst prebuiltSummary = data.summary?.short_summary || '';\nconst prebuiltActions = data.summary?.action_items || '';\n\nreturn {\n  json: {\n    meetingId: data.id,\n    title: data.title,\n    date: data.date,\n    duration: data.duration,\n    speakers,\n    fullTranscript: fullTranscript.substring(0, 12000),\n    prebuiltSummary,\n    prebuiltActions,\n    sentenceCount: sentences.length\n  }\n};"
+            }
+        },
+        {
+            "id": "p6-n5",
+            "name": "Claude - Deep Analysis of Meeting",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 3000, temperature: 0.2, system: 'You are an executive assistant who is extremely precise at extracting structured intelligence from meeting transcripts. You never make up information. If something is not mentioned, say \"Not discussed\". Always attribute action items to the specific person who agreed to do them.', messages: [{ role: 'user', content: 'Analyze this meeting transcript and return ONLY this exact JSON structure (no other text):\\n{\\n  \"executiveSummary\": \"3-4 sentence overview of what was decided and why it matters\",\\n  \"keyDecisions\": [\"Decision 1\", \"Decision 2\"],\\n  \"actionItems\": [{\"task\": \"specific task\", \"owner\": \"person name\", \"deadline\": \"date or timeframe mentioned\", \"priority\": \"HIGH/MEDIUM/LOW\"}],\\n  \"openQuestions\": [\"unresolved question 1\"],\\n  \"sentimentAnalysis\": {\"overall\": \"positive/neutral/negative/tense\", \"notes\": \"1 sentence on group dynamics\"},\\n  \"riskFlags\": [\"any concern, blocker or risk mentioned\"],\\n  \"nextMeeting\": \"date/time if mentioned, else Not scheduled\",\\n  \"attendeeSentiments\": [{\"name\": \"speaker name\", \"sentiment\": \"engaged/disengaged/concerned/positive\"}]\\n}\\n\\nMEETING: ' + $json.title + '\\nDATE: ' + $json.date + '\\nSPEAKERS: ' + $json.speakers.join(', ') + '\\n\\nTRANSCRIPT:\\n' + $json.fullTranscript }] }) }}"
+            }
+        },
+        {
+            "id": "p6-n6",
+            "name": "Parse Meeting Intelligence JSON",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst transcript = $('Extract Transcript Text').item.json;\nlet intel;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  intel = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  intel = { executiveSummary: raw, keyDecisions: [], actionItems: [], openQuestions: [], sentimentAnalysis: { overall: 'unknown', notes: '' }, riskFlags: [], nextMeeting: 'Not scheduled', attendeeSentiments: [] };\n}\n\nconst actionCount = intel.actionItems?.length || 0;\nconst riskCount = intel.riskFlags?.length || 0;\nconst highPriorityCount = (intel.actionItems || []).filter(a => a.priority === 'HIGH').length;\n\nreturn {\n  json: {\n    ...intel,\n    meetingTitle: transcript.title,\n    meetingDate: transcript.date,\n    meetingDuration: transcript.duration,\n    speakers: transcript.speakers,\n    actionCount,\n    riskCount,\n    highPriorityCount,\n    rawTranscriptLength: transcript.fullTranscript.length,\n    processedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p6-n7",
+            "name": "Notion - Create Meeting Page",
+            "type": "n8n-nodes-base.notion",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                -120
+            ],
+            "parameters": {
+                "resource": "page",
+                "operation": "create",
+                "databaseId": "{{NOTION_MEETINGS_DB_ID}}",
+                "title": "={{ $json.meetingTitle + ' — ' + $json.meetingDate.split('T')[0] }}",
+                "propertiesUi": {
+                    "propertyValues": [
+                        {
+                            "key": "Status",
+                            "type": "select",
+                            "selectValue": "Summarized"
+                        },
+                        {
+                            "key": "Date",
+                            "type": "date",
+                            "dateValue": "={{ $json.meetingDate }}"
+                        },
+                        {
+                            "key": "Action Count",
+                            "type": "number",
+                            "numberValue": "={{ $json.actionCount }}"
+                        },
+                        {
+                            "key": "Risk Flags",
+                            "type": "number",
+                            "numberValue": "={{ $json.riskCount }}"
+                        },
+                        {
+                            "key": "Sentiment",
+                            "type": "select",
+                            "selectValue": "={{ $json.sentimentAnalysis?.overall || 'neutral' }}"
+                        },
+                        {
+                            "key": "Attendees",
+                            "type": "richText",
+                            "textValue": "={{ $json.speakers?.join(', ') || '' }}"
+                        }
+                    ]
+                },
+                "blockUi": {
+                    "blockValues": [
+                        {
+                            "type": "heading_2",
+                            "textContent": "Executive Summary"
+                        },
+                        {
+                            "type": "paragraph",
+                            "textContent": "={{ $json.executiveSummary }}"
+                        },
+                        {
+                            "type": "heading_2",
+                            "textContent": "Key Decisions"
+                        },
+                        {
+                            "type": "bulleted_list_item",
+                            "textContent": "={{ ($json.keyDecisions || ['No decisions recorded']).join('\\n') }}"
+                        },
+                        {
+                            "type": "heading_2",
+                            "textContent": "Action Items"
+                        },
+                        {
+                            "type": "paragraph",
+                            "textContent": "={{ ($json.actionItems || []).map(a => `[ ] ${a.task} — Owner: ${a.owner} | Deadline: ${a.deadline} | Priority: ${a.priority}`).join('\\n') }}"
+                        },
+                        {
+                            "type": "heading_2",
+                            "textContent": "Risk Flags"
+                        },
+                        {
+                            "type": "paragraph",
+                            "textContent": "={{ ($json.riskFlags || ['None identified']).join('\\n') }}"
+                        },
+                        {
+                            "type": "heading_2",
+                            "textContent": "Open Questions"
+                        },
+                        {
+                            "type": "paragraph",
+                            "textContent": "={{ ($json.openQuestions || ['None']).join('\\n') }}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p6-n8",
+            "name": "Create Action Item Tasks in Notion",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                120
+            ],
+            "parameters": {
+                "jsCode": "// Prepare action items for individual Notion task creation\nconst intel = $('Parse Meeting Intelligence JSON').item.json;\nconst actionItems = intel.actionItems || [];\nconst notionPageId = $('Notion - Create Meeting Page').item.json.id;\n\nreturn actionItems.map(action => ({\n  json: {\n    task: action.task,\n    owner: action.owner,\n    deadline: action.deadline,\n    priority: action.priority,\n    meetingTitle: intel.meetingTitle,\n    meetingDate: intel.meetingDate,\n    parentPageId: notionPageId\n  }\n}));"
+            }
+        },
+        {
+            "id": "p6-n9",
+            "name": "Notion - Create Each Task",
+            "type": "n8n-nodes-base.notion",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                120
+            ],
+            "parameters": {
+                "resource": "page",
+                "operation": "create",
+                "databaseId": "{{NOTION_TASKS_DB_ID}}",
+                "title": "={{ $json.task }}",
+                "propertiesUi": {
+                    "propertyValues": [
+                        {
+                            "key": "Owner",
+                            "type": "richText",
+                            "textValue": "={{ $json.owner }}"
+                        },
+                        {
+                            "key": "Priority",
+                            "type": "select",
+                            "selectValue": "={{ $json.priority }}"
+                        },
+                        {
+                            "key": "Deadline",
+                            "type": "richText",
+                            "textValue": "={{ $json.deadline }}"
+                        },
+                        {
+                            "key": "Status",
+                            "type": "select",
+                            "selectValue": "To Do"
+                        },
+                        {
+                            "key": "Source Meeting",
+                            "type": "richText",
+                            "textValue": "={{ $json.meetingTitle }}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p6-n10",
+            "name": "Risk Alert Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $('Parse Meeting Intelligence JSON').item.json.riskCount }}",
+                            "rightValue": 0,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gt"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p6-n11",
+            "name": "Slack - Full Meeting Summary",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                -120
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "meeting-summaries"
+                },
+                "text": "=:memo: *Meeting Summarized: {{ $('Parse Meeting Intelligence JSON').item.json.meetingTitle }}*\n\n*Date:* {{ $('Parse Meeting Intelligence JSON').item.json.meetingDate }}\n*Attendees:* {{ $('Parse Meeting Intelligence JSON').item.json.speakers?.join(', ') }}\n*Overall Sentiment:* {{ $('Parse Meeting Intelligence JSON').item.json.sentimentAnalysis?.overall }}\n\n:white_check_mark: *Action Items ({{ $('Parse Meeting Intelligence JSON').item.json.actionCount }}):*\n{{ ($('Parse Meeting Intelligence JSON').item.json.actionItems || []).map(a => `• ${a.task} — *${a.owner}* by ${a.deadline}`).join('\\n') }}\n\n:warning: *Risk Flags ({{ $('Parse Meeting Intelligence JSON').item.json.riskCount }}):*\n{{ ($('Parse Meeting Intelligence JSON').item.json.riskFlags || ['None']).map(r => `• ${r}`).join('\\n') }}\n\n:round_pushpin: *Next Meeting:* {{ $('Parse Meeting Intelligence JSON').item.json.nextMeeting }}\n\n:notepad_spiral: Full notes saved to Notion",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p6-n12",
+            "name": "Slack - Risk Escalation Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                80
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "risk-escalations"
+                },
+                "text": "=:rotating_light: *MEETING RISK FLAGS DETECTED*\n\n*Meeting:* {{ $('Parse Meeting Intelligence JSON').item.json.meetingTitle }}\n*Date:* {{ $('Parse Meeting Intelligence JSON').item.json.meetingDate }}\n\n*Risk Flags Identified ({{ $('Parse Meeting Intelligence JSON').item.json.riskCount }}):*\n{{ ($('Parse Meeting Intelligence JSON').item.json.riskFlags || []).map(r => `:red_circle: ${r}`).join('\\n') }}\n\n*Meeting Sentiment:* {{ $('Parse Meeting Intelligence JSON').item.json.sentimentAnalysis?.overall }}\n*Sentiment Note:* {{ $('Parse Meeting Intelligence JSON').item.json.sentimentAnalysis?.notes }}\n\n@here — please review.",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Fireflies Webhook - Meeting Ended": {
+            "main": [
+                [
+                    {
+                        "node": "Validate Fireflies Payload",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Validate Fireflies Payload": {
+            "main": [
+                [
+                    {
+                        "node": "Fireflies - Fetch Full Transcript",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fireflies - Fetch Full Transcript": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Transcript Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Transcript Text": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Deep Analysis of Meeting",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Deep Analysis of Meeting": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Meeting Intelligence JSON",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Meeting Intelligence JSON": {
+            "main": [
+                [
+                    {
+                        "node": "Notion - Create Meeting Page",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Create Action Item Tasks in Notion",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Risk Alert Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Notion - Create Meeting Page": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Full Meeting Summary",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Create Action Item Tasks in Notion": {
+            "main": [
+                [
+                    {
+                        "node": "Notion - Create Each Task",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Risk Alert Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Risk Escalation Alert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
