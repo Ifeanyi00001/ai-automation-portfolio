@@ -1,0 +1,489 @@
+{
+    "name": "AI Lease Review & Tenant Onboarding",
+    "nodes": [
+        {
+            "id": "p10-n1",
+            "name": "Google Drive - New Lease Uploaded",
+            "type": "n8n-nodes-base.googleDriveTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "event": "fileCreated",
+                "folderId": "{{GOOGLE_DRIVE_LEASE_FOLDER_ID}}",
+                "options": {}
+            }
+        },
+        {
+            "id": "p10-n2",
+            "name": "Download Lease PDF",
+            "type": "n8n-nodes-base.googleDrive",
+            "typeVersion": 3,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "operation": "download",
+                "fileId": "={{ $json.id }}",
+                "options": {
+                    "mimeType": "application/pdf"
+                }
+            }
+        },
+        {
+            "id": "p10-n3",
+            "name": "LlamaParse - Extract Lease Text",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.cloud.llamaindex.ai/api/parsing/upload",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{LLAMAPARSE_API_KEY}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "multipart-form-data",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "file",
+                            "value": "={{ $binary.data }}",
+                            "parameterType": "formBinaryData"
+                        },
+                        {
+                            "name": "language",
+                            "value": "en"
+                        },
+                        {
+                            "name": "parsing_instruction",
+                            "value": "Extract all text from this residential or commercial lease agreement. Preserve all section headings, clause numbers, party names, dates, monetary amounts, and legal terms exactly as written."
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p10-n4",
+            "name": "Wait for LlamaParse Job",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1,
+            "position": [
+                660,
+                0
+            ],
+            "webhookId": "llamaparse-lease-wait",
+            "parameters": {
+                "amount": 25,
+                "unit": "seconds"
+            }
+        },
+        {
+            "id": "p10-n5",
+            "name": "Fetch Parsed Lease Text",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "url": "=https://api.cloud.llamaindex.ai/api/parsing/job/{{ $('LlamaParse - Extract Lease Text').item.json.id }}/result/markdown",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{LLAMAPARSE_API_KEY}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p10-n6",
+            "name": "Claude - Full Lease Intelligence Analysis",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 3000, temperature: 0.1, system: 'You are a licensed real estate paralegal and property law expert. Analyze lease agreements with precision. Flag all non-standard, unfair, or potentially illegal clauses. Your analysis will be used by property managers and landlords. Be thorough, fair, and accurate. Return ONLY valid JSON.', messages: [{ role: 'user', content: 'Analyze this lease agreement and return ONLY this exact JSON:\\n{\\n  \"leaseType\": \"residential|commercial\",\\n  \"landlordName\": \"extracted or Unknown\",\\n  \"tenantName\": \"extracted or Unknown\",\\n  \"tenantEmail\": \"extracted or Unknown\",\\n  \"tenantPhone\": \"extracted or Unknown\",\\n  \"propertyAddress\": \"extracted or Unknown\",\\n  \"leaseStartDate\": \"YYYY-MM-DD or Unknown\",\\n  \"leaseEndDate\": \"YYYY-MM-DD or Unknown\",\\n  \"leaseDurationMonths\": number_or_0,\\n  \"monthlyRent\": number_or_0,\\n  \"rentCurrency\": \"USD|GBP|AUD|etc\",\\n  \"securityDeposit\": number_or_0,\\n  \"rentReviewClause\": \"description or None\",\\n  \"breakClause\": \"description or None\",\\n  \"maintenanceResponsibility\": \"Landlord|Tenant|Mixed|Not specified\",\\n  \"petPolicy\": \"Allowed|Not Allowed|With Permission|Not specified\",\\n  \"sublettingPolicy\": \"Allowed|Not Allowed|With Permission|Not specified\",\\n  \"noticePeriodDays\": number_or_0,\\n  \"riskFlags\": [\"list each unusual, unfair, or legally questionable clause\"],\\n  \"missingClauses\": [\"standard clauses that are absent\"],\\n  \"tenantFavorableClauses\": [\"clauses that benefit the tenant\"],\\n  \"landlordFavorableClauses\": [\"clauses that overly favor the landlord\"],\\n  \"overallRiskScore\": 1_to_10,\\n  \"riskSummary\": \"2-3 sentence summary of overall lease risk\",\\n  \"recommendedActions\": [\"specific actions before signing\"]\\n}\\n\\nLEASE TEXT:\\n' + ($json.markdown || $json.text || JSON.stringify($json)).substring(0, 15000) }] }) }}"
+            }
+        },
+        {
+            "id": "p10-n7",
+            "name": "Parse Lease Analysis",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst driveFile = $('Google Drive - New Lease Uploaded').item.json;\nlet analysis;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  analysis = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  analysis = { leaseType: 'unknown', tenantName: 'Unknown', tenantEmail: 'unknown@example.com', propertyAddress: 'Unknown', monthlyRent: 0, overallRiskScore: 5, riskFlags: ['Parse error — manual review required'], riskSummary: 'Could not parse lease analysis.' };\n}\n\nconst riskLevel = analysis.overallRiskScore >= 7 ? 'HIGH' : analysis.overallRiskScore >= 4 ? 'MEDIUM' : 'LOW';\nconst riskEmoji = riskLevel === 'HIGH' ? ':rotating_light:' : riskLevel === 'MEDIUM' ? ':warning:' : ':white_check_mark:';\n\nreturn {\n  json: {\n    ...analysis,\n    riskLevel,\n    riskEmoji,\n    sourceFileName: driveFile.name || 'Lease Document',\n    sourceFileId: driveFile.id,\n    processedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p10-n8",
+            "name": "High Risk Alert Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                -180
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.overallRiskScore }}",
+                            "rightValue": 6,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gte"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p10-n9",
+            "name": "Slack - Risk Alert to Property Manager",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                -280
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "lease-reviews"
+                },
+                "text": "={{ $json.riskEmoji + ' *LEASE RISK ALERT — ' + $json.riskLevel + ' RISK*\\n\\n*Property:* ' + $json.propertyAddress + '\\n*Tenant:* ' + $json.tenantName + '\\n*Rent:* ' + $json.rentCurrency + ' ' + $json.monthlyRent + '/month\\n*Lease Term:* ' + $json.leaseStartDate + ' → ' + $json.leaseEndDate + '\\n*Risk Score:* ' + $json.overallRiskScore + '/10\\n\\n:red_circle: *Risk Flags:*\\n' + ($json.riskFlags || []).map(f => '• ' + f).join('\\n') + '\\n\\n:orange_circle: *Missing Clauses:*\\n' + ($json.missingClauses || ['None identified']).map(f => '• ' + f).join('\\n') + '\\n\\n*Risk Summary:*\\n' + $json.riskSummary + '\\n\\n:file_folder: Source: ' + $json.sourceFileName }}",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p10-n10",
+            "name": "Google Docs - Generate Lease Summary Report",
+            "type": "n8n-nodes-base.googleDocs",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                -60
+            ],
+            "parameters": {
+                "operation": "create",
+                "title": "={{ 'Lease Analysis — ' + $json.propertyAddress + ' — ' + $json.processedAt.split('T')[0] }}",
+                "folderId": "{{GOOGLE_DRIVE_REPORTS_FOLDER_ID}}",
+                "content": "={{ '# Lease Intelligence Report\\n\\n**Generated:** ' + $json.processedAt + '\\n**Source File:** ' + $json.sourceFileName + '\\n\\n---\\n\\n## Lease Overview\\n\\n| Field | Value |\\n|---|---|\\n| Lease Type | ' + $json.leaseType + ' |\\n| Tenant | ' + $json.tenantName + ' |\\n| Landlord | ' + $json.landlordName + ' |\\n| Property | ' + $json.propertyAddress + ' |\\n| Start Date | ' + $json.leaseStartDate + ' |\\n| End Date | ' + $json.leaseEndDate + ' |\\n| Duration | ' + $json.leaseDurationMonths + ' months |\\n| Monthly Rent | ' + $json.rentCurrency + ' ' + $json.monthlyRent + ' |\\n| Security Deposit | ' + $json.rentCurrency + ' ' + $json.securityDeposit + ' |\\n| Notice Period | ' + $json.noticePeriodDays + ' days |\\n| Break Clause | ' + ($json.breakClause || \"None\") + ' |\\n| Pet Policy | ' + $json.petPolicy + ' |\\n\\n---\\n\\n## Risk Assessment\\n\\n**Overall Risk Score:** ' + $json.overallRiskScore + '/10 (' + $json.riskLevel + ')\\n\\n**Summary:** ' + $json.riskSummary + '\\n\\n### Risk Flags\\n' + ($json.riskFlags || []).map(f => '- ' + f).join('\\n') + '\\n\\n### Missing Standard Clauses\\n' + ($json.missingClauses || [\"None identified\"]).map(f => '- ' + f).join('\\n') + '\\n\\n### Recommended Actions Before Signing\\n' + ($json.recommendedActions || []).map(f => '- ' + f).join('\\n') }}"
+            }
+        },
+        {
+            "id": "p10-n11",
+            "name": "HubSpot - Create Tenant Contact",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1980,
+                -60
+            ],
+            "parameters": {
+                "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{HUBSPOT_ACCESS_TOKEN}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ properties: { firstname: $json.tenantName.split(' ')[0] || 'Unknown', lastname: $json.tenantName.split(' ').slice(1).join(' ') || 'Tenant', email: $json.tenantEmail !== 'Unknown' ? $json.tenantEmail : undefined, phone: $json.tenantPhone !== 'Unknown' ? $json.tenantPhone : undefined, address: $json.propertyAddress, lifecyclestage: 'customer', hs_lead_status: 'IN_PROGRESS', property_address__c: $json.propertyAddress, lease_start_date__c: $json.leaseStartDate, lease_end_date__c: $json.leaseEndDate, monthly_rent__c: $json.monthlyRent.toString() } }) }}"
+            }
+        },
+        {
+            "id": "p10-n12",
+            "name": "DocuSign - Send Lease for E-Signature",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2200,
+                -60
+            ],
+            "parameters": {
+                "url": "https://demo.docusign.net/restapi/v2.1/accounts/{{DOCUSIGN_ACCOUNT_ID}}/envelopes",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{DOCUSIGN_ACCESS_TOKEN}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ emailSubject: 'Please sign your lease for ' + $json.propertyAddress, emailBlurb: 'Dear ' + $json.tenantName + ', please review and sign the attached lease agreement using DocuSign.', status: 'sent', documents: [{ documentBase64: $binary?.data?.toString('base64') || '', name: $json.sourceFileName, fileExtension: 'pdf', documentId: '1' }], recipients: { signers: [{ email: $json.tenantEmail, name: $json.tenantName, recipientId: '1', tabs: { signHereTabs: [{ documentId: '1', pageNumber: '1', xPosition: '100', yPosition: '700' }] } }] } }) }}"
+            }
+        },
+        {
+            "id": "p10-n13",
+            "name": "Twilio - Welcome SMS to Tenant",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2420,
+                -60
+            ],
+            "parameters": {
+                "url": "=https://api.twilio.com/2010-04-01/Accounts/{{TWILIO_ACCOUNT_SID}}/Messages.json",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Basic {{TWILIO_BASE64_AUTH}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "form-urlencoded",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "To",
+                            "value": "={{ $json.tenantPhone !== 'Unknown' ? $json.tenantPhone : '{{DEFAULT_TEST_PHONE}}' }}"
+                        },
+                        {
+                            "name": "From",
+                            "value": "{{TWILIO_PHONE_NUMBER}}"
+                        },
+                        {
+                            "name": "Body",
+                            "value": "={{ 'Welcome ' + $json.tenantName.split(' ')[0] + '! Your lease for ' + $json.propertyAddress + ' has been sent for e-signature via DocuSign. Please check your email (' + $json.tenantEmail + '). Reply HELP for assistance.' }}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p10-n14",
+            "name": "Slack - Onboarding Complete Notification",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                -60
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "property-management"
+                },
+                "text": "=:house_with_garden: *New Tenant Onboarding Initiated*\n\n*Tenant:* {{ $json.tenantName }}\n*Property:* {{ $json.propertyAddress }}\n*Rent:* {{ $json.rentCurrency }} {{ $json.monthlyRent }}/month\n*Lease:* {{ $json.leaseStartDate }} → {{ $json.leaseEndDate }}\n*Deposit:* {{ $json.rentCurrency }} {{ $json.securityDeposit }}\n*Notice Period:* {{ $json.noticePeriodDays }} days\n\n*Risk Score:* {{ $json.riskEmoji }} {{ $json.overallRiskScore }}/10 ({{ $json.riskLevel }})\n\n✅ Lease analysis report created in Google Drive\n✅ Tenant contact created in HubSpot\n✅ DocuSign e-signature envelope sent\n✅ Welcome SMS sent to tenant\n\n*Processed:* {{ $json.processedAt }}",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Google Drive - New Lease Uploaded": {
+            "main": [
+                [
+                    {
+                        "node": "Download Lease PDF",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Download Lease PDF": {
+            "main": [
+                [
+                    {
+                        "node": "LlamaParse - Extract Lease Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "LlamaParse - Extract Lease Text": {
+            "main": [
+                [
+                    {
+                        "node": "Wait for LlamaParse Job",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait for LlamaParse Job": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Parsed Lease Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Parsed Lease Text": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Full Lease Intelligence Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Full Lease Intelligence Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Lease Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Lease Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "High Risk Alert Gate",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Google Docs - Generate Lease Summary Report",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "High Risk Alert Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Risk Alert to Property Manager",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        },
+        "Google Docs - Generate Lease Summary Report": {
+            "main": [
+                [
+                    {
+                        "node": "HubSpot - Create Tenant Contact",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "HubSpot - Create Tenant Contact": {
+            "main": [
+                [
+                    {
+                        "node": "DocuSign - Send Lease for E-Signature",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "DocuSign - Send Lease for E-Signature": {
+            "main": [
+                [
+                    {
+                        "node": "Twilio - Welcome SMS to Tenant",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Twilio - Welcome SMS to Tenant": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Onboarding Complete Notification",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
