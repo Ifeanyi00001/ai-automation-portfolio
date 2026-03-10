@@ -1,0 +1,510 @@
+{
+    "name": "Litigation Research & Response Drafter",
+    "nodes": [
+        {
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "minutes",
+                            "minutesInterval": 5
+                        }
+                    ]
+                }
+            },
+            "id": "node-trigger",
+            "name": "Schedule Trigger (Poll Drive)",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "authentication": "serviceAccount",
+                "operation": "list",
+                "folderId": "={{ $vars.GOOGLE_DRIVE_FOLDER_ID }}",
+                "filter": {
+                    "driveId": {
+                        "mode": "list",
+                        "value": "myDrive"
+                    }
+                }
+            },
+            "id": "node-list-drive",
+            "name": "List New Court Filings (Google Drive)",
+            "type": "n8n-nodes-base.googleDrive",
+            "typeVersion": 3,
+            "position": [
+                220,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "options": {
+                        "caseSensitive": false,
+                        "leftValue": "",
+                        "typeValidation": "strict"
+                    },
+                    "conditions": [
+                        {
+                            "id": "cond-1",
+                            "leftValue": "={{ $json.mimeType }}",
+                            "rightValue": "application/pdf",
+                            "operator": {
+                                "type": "string",
+                                "operation": "equals"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                }
+            },
+            "id": "node-filter-pdf",
+            "name": "Filter: Only PDFs",
+            "type": "n8n-nodes-base.filter",
+            "typeVersion": 2,
+            "position": [
+                440,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "download",
+                "fileId": {
+                    "mode": "id",
+                    "value": "={{ $json.id }}"
+                }
+            },
+            "id": "node-download-pdf",
+            "name": "Download PDF File",
+            "type": "n8n-nodes-base.googleDrive",
+            "typeVersion": 3,
+            "position": [
+                660,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "https://api.cloud.llamaindex.ai/api/parsing/upload",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{ $vars.LLAMAPARSE_API_KEY }}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "multipart-form-data",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "parameterType": "formBinaryData",
+                            "name": "file",
+                            "inputDataFieldName": "data"
+                        }
+                    ]
+                }
+            },
+            "id": "node-llamaparse-upload",
+            "name": "Send to LlamaParse (OCR + Parse)",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "amount": 15,
+                "unit": "seconds"
+            },
+            "id": "node-wait",
+            "name": "Wait for LlamaParse Job",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1,
+            "position": [
+                1100,
+                0
+            ],
+            "webhookId": "wait-llamaparse"
+        },
+        {
+            "parameters": {
+                "method": "GET",
+                "url": "=https://api.cloud.llamaindex.ai/api/parsing/job/{{ $('Send to LlamaParse (OCR + Parse)').item.json.id }}/result/markdown",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{ $vars.LLAMAPARSE_API_KEY }}"
+                        }
+                    ]
+                }
+            },
+            "id": "node-llamaparse-result",
+            "name": "Fetch Parsed Markdown Text",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1320,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "model": "text-embedding-3-small",
+                "input": "={{ $json.markdown }}"
+            },
+            "id": "node-embed",
+            "name": "Generate Embedding (OpenAI)",
+            "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+            "typeVersion": 1,
+            "position": [
+                1540,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "=https://{{ $vars.PINECONE_INDEX_HOST }}/query",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Api-Key",
+                            "value": "={{ $vars.PINECONE_API_KEY }}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={\n  \"vector\": {{ JSON.stringify($json.embedding) }},\n  \"topK\": 5,\n  \"includeMetadata\": true,\n  \"namespace\": \"case-precedents\"\n}"
+            },
+            "id": "node-pinecone-query",
+            "name": "Query Pinecone for Precedents",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const matches = $input.item.json.matches || [];\nconst parsedText = $('Fetch Parsed Markdown Text').item.json.markdown;\nconst fileName = $('List New Court Filings (Google Drive)').item.json.name;\n\nconst precedentSummary = matches.map((m, i) => {\n  return `Precedent ${i+1}: ${m.metadata?.case_name || 'Unknown'} (Score: ${m.score.toFixed(3)})\\n${m.metadata?.summary || ''}\\n`;\n}).join('\\n---\\n');\n\nreturn {\n  json: {\n    fileName,\n    parsedText,\n    precedentSummary,\n    precedentCount: matches.length\n  }\n};"
+            },
+            "id": "node-prepare-prompt",
+            "name": "Prepare AI Prompt Data",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "model": "claude-3-5-sonnet-20241022",
+                "messages": {
+                    "values": [
+                        {
+                            "content": "You are a senior litigation attorney with 20 years of experience. You are precise, logical, and reference case law accurately. Your job is to help draft legal responses.",
+                            "role": "system"
+                        },
+                        {
+                            "content": "=You have received a new court filing titled: **{{ $json.fileName }}**\n\n## COURT FILING CONTENT:\n{{ $json.parsedText }}\n\n## RELEVANT INTERNAL PRECEDENTS (from our case history):\n{{ $json.precedentSummary }}\n\n## YOUR TASK:\n1. Summarize the key claims and relief sought in the filing (max 200 words).\n2. Identify the top 3 legal risks for our client.\n3. Using the internal precedents provided, draft a FIRST-DRAFT 'Request for Production of Documents' response.\n4. List any missing information needed from the client to finalize the response.\n\nFormat your response in clean markdown with headers for each section.",
+                            "role": "user"
+                        }
+                    ]
+                },
+                "options": {
+                    "maxTokens": 4000,
+                    "temperature": 0.2
+                }
+            },
+            "id": "node-claude-draft",
+            "name": "Claude: Draft Legal Response",
+            "type": "@n8n/n8n-nodes-langchain.lmAnthropicChat",
+            "typeVersion": 1,
+            "position": [
+                2200,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "jsCode": "const draft = $input.item.json.content?.[0]?.text || $input.item.json.choices?.[0]?.message?.content || 'Error: Could not generate draft.';\nconst fileName = $('Prepare AI Prompt Data').item.json.fileName;\nconst precedentCount = $('Prepare AI Prompt Data').item.json.precedentCount;\nconst now = new Date().toISOString();\n\nreturn {\n  json: {\n    draft,\n    fileName,\n    precedentCount,\n    generatedAt: now,\n    subject: `[AI DRAFT] Legal Response — ${fileName}`,\n    docTitle: `Response Draft — ${fileName} — ${now.split('T')[0]}`\n  }\n};"
+            },
+            "id": "node-format-output",
+            "name": "Format Final Output",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                0
+            ]
+        },
+        {
+            "parameters": {
+                "operation": "create",
+                "title": "={{ $json.docTitle }}",
+                "content": "={{ $json.draft }}"
+            },
+            "id": "node-google-docs",
+            "name": "Save Draft to Google Docs",
+            "type": "n8n-nodes-base.googleDocs",
+            "typeVersion": 1,
+            "position": [
+                2640,
+                -80
+            ]
+        },
+        {
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "legal-ai-drafts"
+                },
+                "text": "=:scales: *New AI Legal Draft Ready*\n\n*Filing:* {{ $json.fileName }}\n*Precedents Found:* {{ $json.precedentCount }}\n*Generated:* {{ $json.generatedAt }}\n\n*Preview (First 500 chars):*\n```\n{{ $json.draft.substring(0, 500) }}...\n```\n\n:point_right: Full draft saved to Google Docs.",
+                "otherOptions": {}
+            },
+            "id": "node-slack",
+            "name": "Notify Team on Slack",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                80
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.precedentCount }}",
+                            "rightValue": 0,
+                            "operator": {
+                                "type": "number",
+                                "operation": "equals"
+                            }
+                        }
+                    ]
+                }
+            },
+            "id": "node-check-precedents",
+            "name": "Check: Precedents Found?",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "legal-ai-drafts"
+                },
+                "text": "=:warning: *Low Confidence Draft — No Internal Precedents Found*\n\n*Filing:* {{ $('Format Final Output').item.json.fileName }}\n\nThis draft was generated WITHOUT matching internal case history. Please review carefully before use.",
+                "otherOptions": {}
+            },
+            "id": "node-slack-warn",
+            "name": "Slack: Low Confidence Warning",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                300
+            ]
+        }
+    ],
+    "connections": {
+        "Schedule Trigger (Poll Drive)": {
+            "main": [
+                [
+                    {
+                        "node": "List New Court Filings (Google Drive)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "List New Court Filings (Google Drive)": {
+            "main": [
+                [
+                    {
+                        "node": "Filter: Only PDFs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Filter: Only PDFs": {
+            "main": [
+                [
+                    {
+                        "node": "Download PDF File",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Download PDF File": {
+            "main": [
+                [
+                    {
+                        "node": "Send to LlamaParse (OCR + Parse)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Send to LlamaParse (OCR + Parse)": {
+            "main": [
+                [
+                    {
+                        "node": "Wait for LlamaParse Job",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait for LlamaParse Job": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Parsed Markdown Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Parsed Markdown Text": {
+            "main": [
+                [
+                    {
+                        "node": "Generate Embedding (OpenAI)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Generate Embedding (OpenAI)": {
+            "main": [
+                [
+                    {
+                        "node": "Query Pinecone for Precedents",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Query Pinecone for Precedents": {
+            "main": [
+                [
+                    {
+                        "node": "Prepare AI Prompt Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prepare AI Prompt Data": {
+            "main": [
+                [
+                    {
+                        "node": "Claude: Draft Legal Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude: Draft Legal Response": {
+            "main": [
+                [
+                    {
+                        "node": "Format Final Output",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format Final Output": {
+            "main": [
+                [
+                    {
+                        "node": "Save Draft to Google Docs",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Notify Team on Slack",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Check: Precedents Found?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Check: Precedents Found?": {
+            "main": [
+                [
+                    {
+                        "node": "Slack: Low Confidence Warning",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "meta": {
+        "templateId": "portfolio-project-01"
+    }
+}
