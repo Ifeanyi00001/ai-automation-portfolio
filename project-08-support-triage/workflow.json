@@ -1,0 +1,515 @@
+{
+    "name": "AI Customer Support Triage & Auto-Response",
+    "nodes": [
+        {
+            "id": "p8-n1",
+            "name": "Support Ticket Webhook",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "webhookId": "support-ticket-inbound",
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "new-support-ticket",
+                "responseMode": "lastNode",
+                "options": {}
+            }
+        },
+        {
+            "id": "p8-n2",
+            "name": "Parse Ticket Data",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const body = $input.item.json.body || $input.item.json;\n\n// Handle Zendesk, Gmail, Intercom, or raw webhook formats\nconst ticket = {\n  ticketId: body.id || body.ticket_id || body.messageId || `TKT-${Date.now()}`,\n  subject: body.subject || body.title || body.Subject || 'No Subject',\n  body: body.description || body.body || body.message || body.text || body.Body || '',\n  customerEmail: body.requester?.email || body.from || body.email || body.customerEmail || 'unknown@example.com',\n  customerName: body.requester?.name || body.name || body.customerName || 'Customer',\n  source: body.channel || body.source || 'email',\n  priority: body.priority || 'normal',\n  createdAt: body.created_at || body.timestamp || new Date().toISOString(),\n  tags: body.tags || []\n};\n\nif (!ticket.body || ticket.body.length < 5) {\n  throw new Error(`Ticket ${ticket.ticketId} has no body content`);\n}\n\nreturn { json: ticket };"
+            }
+        },
+        {
+            "id": "p8-n3",
+            "name": "Claude - Classify & Extract Intent",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 600, temperature: 0.1, system: 'You are a customer support classifier. Analyze support tickets with precision. Return only valid JSON.', messages: [{ role: 'user', content: 'Classify this support ticket and return ONLY this JSON:\\n{\\n  \"category\": \"billing|technical|refund|general|complaint|urgent|feature_request\",\\n  \"urgency\": \"critical|high|medium|low\",\\n  \"sentiment\": \"angry|frustrated|neutral|confused|positive\",\\n  \"intent\": \"one sentence describing exactly what the customer wants\",\\n  \"keyEntities\": [\"product names, order numbers, dates mentioned\"],\\n  \"canAutoRespond\": true_or_false,\\n  \"autoRespondConfidence\": 0_to_100,\\n  \"escalationReason\": \"why this needs human review or null if canAutoRespond is true\"\\n}\\n\\nTicket Subject: ' + $json.subject + '\\nTicket Body: ' + $json.body + '\\n\\nRULES:\\n- canAutoRespond=true only if: category is general/billing/technical AND urgency is medium/low AND sentiment is not angry\\n- canAutoRespond=false if: refund request, complaint, critical urgency, or angry sentiment\\n- autoRespondConfidence below 70 means escalate even if canAutoRespond is true' }] }) }}"
+            }
+        },
+        {
+            "id": "p8-n4",
+            "name": "Parse Classification",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst ticket = $('Parse Ticket Data').item.json;\nlet classification;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  classification = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  classification = { category: 'general', urgency: 'medium', sentiment: 'neutral', intent: 'Unknown', keyEntities: [], canAutoRespond: false, autoRespondConfidence: 0, escalationReason: 'Parse error in classification' };\n}\n\nconst shouldAutoRespond = classification.canAutoRespond && (classification.autoRespondConfidence || 0) >= 70;\n\nreturn {\n  json: {\n    ...ticket,\n    category: classification.category || 'general',\n    urgency: classification.urgency || 'medium',\n    sentiment: classification.sentiment || 'neutral',\n    intent: classification.intent || '',\n    keyEntities: classification.keyEntities || [],\n    canAutoRespond: classification.canAutoRespond || false,\n    autoRespondConfidence: classification.autoRespondConfidence || 0,\n    escalationReason: classification.escalationReason || null,\n    shouldAutoRespond\n  }\n};"
+            }
+        },
+        {
+            "id": "p8-n5",
+            "name": "OpenAI - Embed Ticket for KB Search",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.openai.com/v1/embeddings",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{OPENAI_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'text-embedding-3-small', input: $json.subject + ' ' + $json.body + ' ' + $json.intent }) }}"
+            }
+        },
+        {
+            "id": "p8-n6",
+            "name": "Pinecone - Search Knowledge Base",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "url": "https://{{PINECONE_INDEX_HOST}}/query",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Api-Key",
+                            "value": "{{PINECONE_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ vector: $json.data[0].embedding, topK: 5, includeMetadata: true, namespace: 'support-kb' }) }}"
+            }
+        },
+        {
+            "id": "p8-n7",
+            "name": "Extract KB Context",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const pineconeResult = $input.item.json;\nconst ticket = $('Parse Classification').item.json;\nconst matches = pineconeResult.matches || [];\n\n// Build KB context from top matches\nconst kbContext = matches\n  .filter(m => m.score > 0.75)\n  .map((m, i) => `KB Article ${i+1} (relevance: ${(m.score * 100).toFixed(0)}%):\\n${m.metadata?.content || m.metadata?.text || 'No content'}`)\n  .join('\\n\\n');\n\nconst topScore = matches[0]?.score || 0;\nconst kbArticlesFound = matches.filter(m => m.score > 0.75).length;\n\nreturn {\n  json: {\n    ...ticket,\n    kbContext,\n    kbArticlesFound,\n    kbTopScore: topScore,\n    hasRelevantKB: kbArticlesFound > 0\n  }\n};"
+            }
+        },
+        {
+            "id": "p8-n8",
+            "name": "Auto-Respond Decision Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.shouldAutoRespond }}",
+                            "rightValue": true,
+                            "operator": {
+                                "type": "boolean",
+                                "operation": "equals"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p8-n9",
+            "name": "Claude - Draft Auto-Response",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                -180
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 800, temperature: 0.3, system: 'You are a professional customer support specialist. Write warm, helpful, and concise email responses. Never make promises you cannot keep. Never mention you are an AI. Address the customer by first name. Use the knowledge base articles provided to give accurate answers. Sign off as \"The Support Team\".', messages: [{ role: 'user', content: 'Write a customer support email response for this ticket.\\n\\nCUSTOMER NAME: ' + $json.customerName.split(' ')[0] + '\\nTICKET SUBJECT: ' + $json.subject + '\\nCUSTOMER MESSAGE: ' + $json.body + '\\nCUSTOMER INTENT: ' + $json.intent + '\\nCATEGORY: ' + $json.category + '\\n\\nRELEVANT KNOWLEDGE BASE ARTICLES:\\n' + ($json.kbContext || 'No specific KB articles found. Use general best practices.') + '\\n\\nWRITE: A professional, empathetic 3-4 paragraph response that:\\n1. Acknowledges their issue specifically\\n2. Provides a clear solution or next steps\\n3. Sets expectations on timeline if needed\\n4. Ends with an offer to help further\\n\\nDo not include a subject line. Start directly with the greeting.' }] }) }}"
+            }
+        },
+        {
+            "id": "p8-n10",
+            "name": "Extract Draft Response",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                -180
+            ],
+            "parameters": {
+                "jsCode": "const draftResponse = $input.item.json.content?.[0]?.text || 'We have received your request and will respond shortly.';\nconst ticket = $('Extract KB Context').item.json;\nreturn {\n  json: {\n    ...ticket,\n    draftResponse,\n    emailSubject: 'Re: ' + ticket.subject,\n    respondedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p8-n11",
+            "name": "Gmail - Send Auto-Response",
+            "type": "n8n-nodes-base.gmail",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                -180
+            ],
+            "parameters": {
+                "operation": "send",
+                "toList": "={{ $json.customerEmail }}",
+                "subject": "={{ $json.emailSubject }}",
+                "message": "={{ $json.draftResponse }}",
+                "options": {}
+            }
+        },
+        {
+            "id": "p8-n12",
+            "name": "Zendesk - Update Ticket Status",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2420,
+                -180
+            ],
+            "parameters": {
+                "url": "=https://{{ZENDESK_SUBDOMAIN}}.zendesk.com/api/v2/tickets/{{ $json.ticketId }}.json",
+                "method": "PUT",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Basic {{ZENDESK_BASE64_AUTH}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ ticket: { status: 'pending', tags: [$json.category, 'ai-responded', 'auto-closed'], comment: { body: 'AI auto-response sent. Confidence: ' + $json.autoRespondConfidence + '%. KB articles used: ' + $json.kbArticlesFound, public: false } } }) }}"
+            }
+        },
+        {
+            "id": "p8-n13",
+            "name": "Slack - Human Escalation Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                120
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "support-escalations"
+                },
+                "text": "=:rotating_light: *TICKET NEEDS HUMAN REVIEW*\n\n*Ticket ID:* {{ $json.ticketId }}\n*From:* {{ $json.customerName }} ({{ $json.customerEmail }})\n*Subject:* {{ $json.subject }}\n*Category:* {{ $json.category }}\n*Urgency:* {{ $json.urgency }}\n*Sentiment:* {{ $json.sentiment }}\n*AI Confidence:* {{ $json.autoRespondConfidence }}%\n\n*Why Escalated:* {{ $json.escalationReason || 'Low confidence or high-risk category' }}\n\n*Customer Intent:* {{ $json.intent }}\n\n*Message Preview:*\n```{{ $json.body?.substring(0, 400) }}```\n\n:point_right: Assign this ticket in Zendesk.",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p8-n14",
+            "name": "Airtable - Log All Tickets",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                0
+            ],
+            "parameters": {
+                "operation": "create",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_SUPPORT_TABLE_ID}}",
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Ticket ID": "={{ $json.ticketId }}",
+                        "Customer Email": "={{ $json.customerEmail }}",
+                        "Customer Name": "={{ $json.customerName }}",
+                        "Subject": "={{ $json.subject }}",
+                        "Category": "={{ $json.category }}",
+                        "Urgency": "={{ $json.urgency }}",
+                        "Sentiment": "={{ $json.sentiment }}",
+                        "Intent": "={{ $json.intent }}",
+                        "Auto Responded": "={{ $json.shouldAutoRespond ? 'Yes' : 'No' }}",
+                        "AI Confidence": "={{ $json.autoRespondConfidence }}",
+                        "KB Articles Used": "={{ $json.kbArticlesFound }}",
+                        "Received At": "={{ $json.createdAt }}",
+                        "Processed At": "={{ new Date().toISOString() }}"
+                    }
+                }
+            }
+        },
+        {
+            "id": "p8-n15",
+            "name": "Slack - Auto-Response Sent Confirmation",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                -180
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "support-activity"
+                },
+                "text": "=:white_check_mark: *Auto-Response Sent*\n\n*Ticket:* {{ $json.ticketId }} — {{ $json.subject }}\n*Customer:* {{ $json.customerName }} ({{ $json.customerEmail }})\n*Category:* {{ $json.category }} | *Confidence:* {{ $json.autoRespondConfidence }}%\n*KB Articles Used:* {{ $json.kbArticlesFound }}\n*Sentiment:* {{ $json.sentiment }}\n\n_Response sent at {{ $json.respondedAt }}_",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Support Ticket Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Ticket Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Ticket Data": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Classify & Extract Intent",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Classify & Extract Intent": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Classification",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Classification": {
+            "main": [
+                [
+                    {
+                        "node": "OpenAI - Embed Ticket for KB Search",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "OpenAI - Embed Ticket for KB Search": {
+            "main": [
+                [
+                    {
+                        "node": "Pinecone - Search Knowledge Base",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Pinecone - Search Knowledge Base": {
+            "main": [
+                [
+                    {
+                        "node": "Extract KB Context",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract KB Context": {
+            "main": [
+                [
+                    {
+                        "node": "Auto-Respond Decision Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Auto-Respond Decision Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Draft Auto-Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Slack - Human Escalation Alert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Draft Auto-Response": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Draft Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Draft Response": {
+            "main": [
+                [
+                    {
+                        "node": "Gmail - Send Auto-Response",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Gmail - Send Auto-Response": {
+            "main": [
+                [
+                    {
+                        "node": "Zendesk - Update Ticket Status",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Zendesk - Update Ticket Status": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Log All Tickets",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Log All Tickets": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Auto-Response Sent Confirmation",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Slack - Human Escalation Alert": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Log All Tickets",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
