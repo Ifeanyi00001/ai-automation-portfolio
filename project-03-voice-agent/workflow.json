@@ -1,0 +1,579 @@
+{
+    "name": "AI Property Concierge - Voice Agent",
+    "nodes": [
+        {
+            "id": "p3-n1",
+            "name": "Lead Webhook Trigger",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                0,
+                0
+            ],
+            "webhookId": "zillow-lead-inbound",
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "new-property-lead",
+                "responseMode": "lastNode",
+                "options": {}
+            }
+        },
+        {
+            "id": "p3-n2",
+            "name": "Parse Lead Data",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const body = $input.item.json.body || $input.item.json;\nconst lead = {\n  firstName: body.first_name || body.firstName || 'Unknown',\n  lastName: body.last_name || body.lastName || '',\n  email: body.email || body.Email || '',\n  phone: body.phone || body.Phone || body.mobile || '',\n  propertyInterest: body.property_address || body.listing_address || body.propertyInterest || 'Not specified',\n  budget: body.budget || body.price_range || 'Not specified',\n  source: body.source || body.lead_source || 'Zillow',\n  message: body.message || body.comments || '',\n  timeline: body.timeline || body.move_in_date || 'Not specified',\n  receivedAt: new Date().toISOString()\n};\nreturn { json: lead };"
+            }
+        },
+        {
+            "id": "p3-n3",
+            "name": "Create Contact in HubSpot",
+            "type": "n8n-nodes-base.hubspot",
+            "typeVersion": 2,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "resource": "contact",
+                "operation": "upsert",
+                "additionalFields": {
+                    "email": "={{ $json.email }}",
+                    "firstname": "={{ $json.firstName }}",
+                    "lastname": "={{ $json.lastName }}",
+                    "phone": "={{ $json.phone }}",
+                    "hs_lead_status": "NEW",
+                    "lifecyclestage": "lead",
+                    "lead_source": "={{ $json.source }}"
+                }
+            }
+        },
+        {
+            "id": "p3-n4",
+            "name": "Validate Phone Number",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $('Parse Lead Data').item.json.phone }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "string",
+                                "operation": "notEquals"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p3-n5",
+            "name": "Vapi - Initiate AI Outbound Call",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                -120
+            ],
+            "parameters": {
+                "url": "https://api.vapi.ai/call/phone",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{VAPI_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ assistantId: '{{VAPI_ASSISTANT_ID}}', customer: { number: $('Parse Lead Data').item.json.phone, name: $('Parse Lead Data').item.json.firstName + ' ' + $('Parse Lead Data').item.json.lastName }, phoneNumberId: '{{VAPI_PHONE_NUMBER_ID}}', assistantOverrides: { variableValues: { leadFirstName: $('Parse Lead Data').item.json.firstName, propertyInterest: $('Parse Lead Data').item.json.propertyInterest, budget: $('Parse Lead Data').item.json.budget, timeline: $('Parse Lead Data').item.json.timeline, leadSource: $('Parse Lead Data').item.json.source } } }) }}"
+            }
+        },
+        {
+            "id": "p3-n6",
+            "name": "Log Call Initiated",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                -120
+            ],
+            "parameters": {
+                "jsCode": "const callData = $input.item.json;\nconst lead = $('Parse Lead Data').item.json;\nreturn { json: { callId: callData.id, callStatus: callData.status, leadPhone: lead.phone, leadName: lead.firstName + ' ' + lead.lastName, initiatedAt: new Date().toISOString() } };"
+            }
+        },
+        {
+            "id": "p3-n7",
+            "name": "Vapi Call Completed Webhook",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                -120
+            ],
+            "webhookId": "vapi-call-complete",
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "vapi-call-result",
+                "responseMode": "responseNode",
+                "options": {}
+            }
+        },
+        {
+            "id": "p3-n8",
+            "name": "Extract Call Transcript",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                -120
+            ],
+            "parameters": {
+                "jsCode": "const payload = $input.item.json;\nconst transcript = payload.message?.artifact?.transcript || payload.transcript || payload.message?.transcript || 'No transcript available';\nconst callDuration = payload.message?.artifact?.duration || payload.duration || 0;\nconst callStatus = payload.message?.status || payload.status || 'unknown';\nconst callId = payload.message?.call?.id || payload.callId || '';\n\nreturn {\n  json: {\n    transcript,\n    callDuration,\n    callStatus,\n    callId,\n    extractedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p3-n9",
+            "name": "Claude - Score Lead from Transcript",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                -120
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 1000, temperature: 0.2, system: 'You are a real estate sales analyst. Analyze phone call transcripts and score leads on their likelihood to buy. Be precise and data-driven.', messages: [{ role: 'user', content: 'Analyze this real estate lead call transcript and return a JSON object with these fields: leadScore (0-100), intent (hot/warm/cold), budgetConfirmed (true/false), timelineUrgency (immediate/within-3-months/within-6-months/browsing), keyObjections (array of strings), readyForViewing (true/false), notes (1-2 sentence summary). ONLY return valid JSON, no other text.\n\nCALL TRANSCRIPT:\n' + $json.transcript }] }) }}"
+            }
+        },
+        {
+            "id": "p3-n10",
+            "name": "Parse Lead Score JSON",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                -120
+            ],
+            "parameters": {
+                "jsCode": "const response = $input.item.json.content?.[0]?.text || '{}';\nlet analysis;\ntry {\n  analysis = JSON.parse(response);\n} catch(e) {\n  const match = response.match(/\\{[\\s\\S]*\\}/);\n  analysis = match ? JSON.parse(match[0]) : { leadScore: 50, intent: 'warm', readyForViewing: false, notes: 'Parse error' };\n}\nreturn { json: { ...analysis, rawResponse: response } };"
+            }
+        },
+        {
+            "id": "p3-n11",
+            "name": "Hot Lead Gate - Score >= 65",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                -120
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.leadScore }}",
+                            "rightValue": 65,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gte"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p3-n12",
+            "name": "Calendly - Get Available Slots",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2420,
+                -240
+            ],
+            "parameters": {
+                "url": "https://api.calendly.com/event_types",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{CALENDLY_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "user",
+                            "value": "{{CALENDLY_USER_URI}}"
+                        },
+                        {
+                            "name": "active",
+                            "value": "true"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p3-n13",
+            "name": "Calendly - Create Invitee",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2640,
+                -240
+            ],
+            "parameters": {
+                "url": "=https://api.calendly.com/one_off_event_types",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{CALENDLY_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ name: 'Property Viewing - ' + $('Parse Lead Data').item.json.firstName + ' ' + $('Parse Lead Data').item.json.lastName, host: '{{CALENDLY_USER_URI}}', duration: 60, timezone: 'America/New_York', date_setting: { type: 'moving_window', rolling_days: 5 }, location: { kind: 'physical', location: $('Parse Lead Data').item.json.propertyInterest, additional_info: 'Property Viewing Appointment' } }) }}"
+            }
+        },
+        {
+            "id": "p3-n14",
+            "name": "Update HubSpot - Hot Lead",
+            "type": "n8n-nodes-base.hubspot",
+            "typeVersion": 2,
+            "position": [
+                2860,
+                -240
+            ],
+            "parameters": {
+                "resource": "contact",
+                "operation": "update",
+                "contactId": "={{ $('Create Contact in HubSpot').item.json.id }}",
+                "additionalFields": {
+                    "hs_lead_status": "IN_PROGRESS",
+                    "lifecyclestage": "salesqualifiedlead",
+                    "notes_last_activity": "={{ 'AI Voice Call Score: ' + $('Parse Lead Score JSON').item.json.leadScore + '/100 - ' + $('Parse Lead Score JSON').item.json.notes }}",
+                    "hs_sales_email_last_replied": "={{ new Date().toISOString() }}"
+                }
+            }
+        },
+        {
+            "id": "p3-n15",
+            "name": "Slack - Hot Lead Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                3080,
+                -240
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "real-estate-leads"
+                },
+                "text": "=:fire: *HOT LEAD — VIEWING BOOKED*\n\n*Name:* {{ $('Parse Lead Data').item.json.firstName }} {{ $('Parse Lead Data').item.json.lastName }}\n*Phone:* {{ $('Parse Lead Data').item.json.phone }}\n*Property Interest:* {{ $('Parse Lead Data').item.json.propertyInterest }}\n*Budget:* {{ $('Parse Lead Data').item.json.budget }}\n*AI Lead Score:* {{ $('Parse Lead Score JSON').item.json.leadScore }}/100\n*Intent:* {{ $('Parse Lead Score JSON').item.json.intent }}\n*Timeline:* {{ $('Parse Lead Score JSON').item.json.timelineUrgency }}\n\n*AI Analysis:* {{ $('Parse Lead Score JSON').item.json.notes }}\n\n:calendar: Calendly booking link sent!",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p3-n16",
+            "name": "Send Nurture Email - Cold Lead",
+            "type": "n8n-nodes-base.gmail",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                0
+            ],
+            "parameters": {
+                "operation": "send",
+                "toList": "={{ $('Parse Lead Data').item.json.email }}",
+                "subject": "=Thanks for your interest, {{ $('Parse Lead Data').item.json.firstName }}!",
+                "message": "=Hi {{ $('Parse Lead Data').item.json.firstName }},\n\nThank you for your inquiry about {{ $('Parse Lead Data').item.json.propertyInterest }}.\n\nWe know finding the right property takes time. We'll keep you updated on new listings that match your criteria and reach back out when the timing is right.\n\nIn the meantime, feel free to browse our latest listings: [Your Website]\n\nWarm regards,\nYour Property Concierge Team",
+                "options": {}
+            }
+        },
+        {
+            "id": "p3-n17",
+            "name": "Update HubSpot - Cold Lead",
+            "type": "n8n-nodes-base.hubspot",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                0
+            ],
+            "parameters": {
+                "resource": "contact",
+                "operation": "update",
+                "contactId": "={{ $('Create Contact in HubSpot').item.json.id }}",
+                "additionalFields": {
+                    "hs_lead_status": "OPEN",
+                    "lifecyclestage": "lead",
+                    "notes_last_activity": "={{ 'AI Voice Call Score: ' + $('Parse Lead Score JSON').item.json.leadScore + '/100 - Cold lead. Nurture email sent. Notes: ' + $('Parse Lead Score JSON').item.json.notes }}"
+                }
+            }
+        },
+        {
+            "id": "p3-n18",
+            "name": "Slack - No Phone Warning",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                880,
+                120
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "real-estate-leads"
+                },
+                "text": "=:warning: *New Lead — No Phone Number*\n\n*Name:* {{ $('Parse Lead Data').item.json.firstName }} {{ $('Parse Lead Data').item.json.lastName }}\n*Email:* {{ $('Parse Lead Data').item.json.email }}\n*Property:* {{ $('Parse Lead Data').item.json.propertyInterest }}\n*Source:* {{ $('Parse Lead Data').item.json.source }}\n\nNo phone number provided — cannot initiate AI call. Please follow up manually.",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Lead Webhook Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Lead Data",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Lead Data": {
+            "main": [
+                [
+                    {
+                        "node": "Create Contact in HubSpot",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Create Contact in HubSpot": {
+            "main": [
+                [
+                    {
+                        "node": "Validate Phone Number",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Validate Phone Number": {
+            "main": [
+                [
+                    {
+                        "node": "Vapi - Initiate AI Outbound Call",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Slack - No Phone Warning",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Vapi - Initiate AI Outbound Call": {
+            "main": [
+                [
+                    {
+                        "node": "Log Call Initiated",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Log Call Initiated": {
+            "main": [
+                [
+                    {
+                        "node": "Vapi Call Completed Webhook",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Vapi Call Completed Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Call Transcript",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Call Transcript": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Score Lead from Transcript",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Score Lead from Transcript": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Lead Score JSON",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Lead Score JSON": {
+            "main": [
+                [
+                    {
+                        "node": "Hot Lead Gate - Score >= 65",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Hot Lead Gate - Score >= 65": {
+            "main": [
+                [
+                    {
+                        "node": "Calendly - Get Available Slots",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Send Nurture Email - Cold Lead",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Calendly - Get Available Slots": {
+            "main": [
+                [
+                    {
+                        "node": "Calendly - Create Invitee",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Calendly - Create Invitee": {
+            "main": [
+                [
+                    {
+                        "node": "Update HubSpot - Hot Lead",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Update HubSpot - Hot Lead": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Hot Lead Alert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Send Nurture Email - Cold Lead": {
+            "main": [
+                [
+                    {
+                        "node": "Update HubSpot - Cold Lead",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
