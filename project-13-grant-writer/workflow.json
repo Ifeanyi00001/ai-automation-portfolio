@@ -1,0 +1,473 @@
+{
+    "name": "AI Grant Proposal Writer",
+    "nodes": [
+        {
+            "id": "p13-n1",
+            "name": "Typeform - Grant Intake Submission",
+            "type": "n8n-nodes-base.typeformTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "formId": "{{TYPEFORM_GRANT_FORM_ID}}",
+                "simplifyResponse": false
+            }
+        },
+        {
+            "id": "p13-n2",
+            "name": "Extract Organisation Profile",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const form = $input.item.json.form_response || $input.item.json;\nconst answers = form.answers || [];\nconst hidden = form.hidden || {};\n\nconst get = (ref) => answers.find(a => a.field?.ref === ref);\nconst getText = (ref) => get(ref)?.text || get(ref)?.choice?.label || hidden[ref] || '';\nconst getNum = (ref) => parseFloat(get(ref)?.number || get(ref)?.text || 0);\n\nconst org = {\n  orgName: getText('org_name'),\n  orgType: getText('org_type'),\n  orgWebsite: getText('org_website'),\n  contactName: getText('contact_name'),\n  contactEmail: getText('contact_email') || form.hidden?.email || '',\n  contactPhone: getText('contact_phone'),\n  mission: getText('mission'),\n  yearFounded: getText('year_founded'),\n  numStaff: getText('num_staff'),\n  annualBudget: getText('annual_budget'),\n  pastGrants: getText('past_grants'),\n  projectTitle: getText('project_title'),\n  projectSummary: getText('project_summary'),\n  projectLocation: getText('project_location'),\n  targetBeneficiaries: getText('target_beneficiaries'),\n  projectDuration: getText('project_duration'),\n  amountRequested: getNum('amount_requested'),\n  totalProjectCost: getNum('total_project_cost'),\n  fundingGap: getText('funding_gap'),\n  outcomesExpected: getText('outcomes_expected'),\n  evaluationPlan: getText('evaluation_plan'),\n  grantUrl: getText('grant_url'),\n  grantFunder: getText('grant_funder'),\n  grantDeadline: getText('grant_deadline'),\n  additionalContext: getText('additional_context')\n};\n\nif (!org.contactEmail) throw new Error('No contact email provided');\nif (!org.grantUrl) throw new Error('No grant URL provided');\n\norg.applicationId = 'GRT-' + Date.now().toString().slice(-7);\norg.submittedAt = new Date().toISOString();\n\nreturn { json: org };"
+            }
+        },
+        {
+            "id": "p13-n3",
+            "name": "Firecrawl - Scrape Grant Funder Page",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.firecrawl.dev/v1/scrape",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{FIRECRAWL_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ url: $json.grantUrl, formats: ['markdown'], onlyMainContent: true, waitFor: 2000 }) }}"
+            }
+        },
+        {
+            "id": "p13-n4",
+            "name": "Extract Grant Criteria",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const scraped = $input.item.json.data?.markdown || $input.item.json.markdown || $input.item.json.content || '';\nconst org = $('Extract Organisation Profile').item.json;\n\n// Truncate scraped content to avoid token overflow\nconst grantContent = scraped.substring(0, 6000);\n\nreturn {\n  json: {\n    ...org,\n    grantPageContent: grantContent,\n    grantPageLength: scraped.length,\n    scrapedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p13-n5",
+            "name": "Claude - Eligibility Assessment",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 1000, temperature: 0.1, system: 'You are a senior grant consultant with 20 years experience assessing grant eligibility and writing winning proposals. Return only valid JSON.', messages: [{ role: 'user', content: 'Assess eligibility for this grant application.\\n\\nORGANISATION PROFILE:\\nName: ' + $json.orgName + '\\nType: ' + $json.orgType + '\\nMission: ' + $json.mission + '\\nProject: ' + $json.projectTitle + '\\nSummary: ' + $json.projectSummary + '\\nAmount Requested: $' + $json.amountRequested + '\\nTotal Project Cost: $' + $json.totalProjectCost + '\\nBeneficiaries: ' + $json.targetBeneficiaries + '\\n\\nGRANT FUNDER PAGE CONTENT:\\n' + $json.grantPageContent + '\\n\\nReturn ONLY this JSON:\\n{\\n  \"isEligible\": true_or_false,\\n  \"eligibilityScore\": 1_to_100,\\n  \"eligibilityReason\": \"2-3 sentence explanation\",\\n  \"keyThemes\": [\"top 5 themes this grant prioritises based on the funder page\"],\\n  \"strengthsForThisGrant\": [\"org strengths that align with the grant\"],\\n  \"weaknesses\": [\"potential issues or gaps in the application\"],\\n  \"keywordsToUse\": [\"specific language/phrases from the funder page to mirror in the proposal\"],\\n  \"recommendedBudgetApproach\": \"advice on how to frame the budget request\",\\n  \"winningAngle\": \"the single most compelling angle for this specific funder\"\\n}' }] }) }}"
+            }
+        },
+        {
+            "id": "p13-n6",
+            "name": "Parse Eligibility Result",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst org = $('Extract Grant Criteria').item.json;\nlet assessment;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  assessment = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  assessment = { isEligible: true, eligibilityScore: 50, eligibilityReason: 'Could not auto-assess — proceeding to manual review.', keyThemes: [], strengthsForThisGrant: [], weaknesses: ['Eligibility parse error'], keywordsToUse: [], recommendedBudgetApproach: 'Standard approach', winningAngle: 'General impact' };\n}\nreturn {\n  json: {\n    ...org,\n    isEligible: assessment.isEligible,\n    eligibilityScore: assessment.eligibilityScore || 0,\n    eligibilityReason: assessment.eligibilityReason || '',\n    keyThemes: assessment.keyThemes || [],\n    strengthsForThisGrant: assessment.strengthsForThisGrant || [],\n    weaknesses: assessment.weaknesses || [],\n    keywordsToUse: assessment.keywordsToUse || [],\n    recommendedBudgetApproach: assessment.recommendedBudgetApproach || '',\n    winningAngle: assessment.winningAngle || ''\n  }\n};"
+            }
+        },
+        {
+            "id": "p13-n7",
+            "name": "Eligibility Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.isEligible }}",
+                            "rightValue": true,
+                            "operator": {
+                                "type": "boolean",
+                                "operation": "equals"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p13-n8",
+            "name": "Gmail - Ineligibility Notice",
+            "type": "n8n-nodes-base.gmail",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                180
+            ],
+            "parameters": {
+                "operation": "send",
+                "toList": "={{ $json.contactEmail }}",
+                "subject": "={{ 'Grant Application Assessment — ' + $json.projectTitle }}",
+                "message": "={{ '<p>Dear ' + $json.contactName + ',</p><p>Thank you for submitting your grant application intake for <strong>' + $json.projectTitle + '</strong> through our AI Grant Assessment system.</p><p>After reviewing your organisation profile against the eligibility criteria for <strong>' + $json.grantFunder + '</strong>, our assessment indicates that this particular application may face eligibility challenges:</p><p><em>' + $json.eligibilityReason + '</em></p><p>Eligibility confidence score: ' + $json.eligibilityScore + '/100</p><p>We recommend reviewing the grant criteria at ' + $json.grantUrl + ' and considering alternative funding opportunities. Our team can assist in identifying better-matched grants for your project.</p><p>Best regards,<br>Grant Services Team</p>' }}",
+                "options": {}
+            }
+        },
+        {
+            "id": "p13-n9",
+            "name": "Claude - Write Full Grant Proposal",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1540,
+                -180
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 4000, temperature: 0.5, system: 'You are an award-winning grant writer with expertise across social services, arts, environment, research, and community development. You write compelling, evidence-based proposals that funders fund. Mirror the funder\\'s language. Be specific and quantifiable. Write in the third person. Return only valid JSON.', messages: [{ role: 'user', content: 'Write a complete, fundable grant proposal using this information.\\n\\nORGANISATION: ' + $json.orgName + ' (' + $json.orgType + ')\\nMISSION: ' + $json.mission + '\\nFOUNDED: ' + $json.yearFounded + '\\nSTAFF: ' + $json.numStaff + '\\nANNUAL BUDGET: ' + $json.annualBudget + '\\nPAST GRANTS: ' + $json.pastGrants + '\\n\\nPROJECT TITLE: ' + $json.projectTitle + '\\nSUMMARY: ' + $json.projectSummary + '\\nLOCATION: ' + $json.projectLocation + '\\nBENEFICIARIES: ' + $json.targetBeneficiaries + '\\nDURATION: ' + $json.projectDuration + '\\nAMOUNT REQUESTED: $' + $json.amountRequested + '\\nTOTAL PROJECT COST: $' + $json.totalProjectCost + '\\nFUNDING GAP: ' + $json.fundingGap + '\\nEXPECTED OUTCOMES: ' + $json.outcomesExpected + '\\nEVALUATION PLAN: ' + $json.evaluationPlan + '\\nADDITIONAL CONTEXT: ' + $json.additionalContext + '\\n\\nGRANT FUNDER: ' + $json.grantFunder + '\\nKEY THEMES TO ADDRESS: ' + $json.keyThemes.join(\\', \\') + '\\nWINNING ANGLE: ' + $json.winningAngle + '\\nKEYWORDS TO MIRROR: ' + $json.keywordsToUse.join(\\', \\') + '\\n\\nReturn ONLY this JSON:\\n{\\n  \"executiveSummary\": \"200-word compelling overview that hooks the funder immediately\",\\n  \"problemStatement\": \"300-word evidence-based articulation of the need/problem being addressed\",\\n  \"projectDescription\": \"400-word detailed description of what will be done, how\",\\n  \"methodology\": \"300-word description of approach, activities, timeline milestones\",\\n  \"expectedOutcomes\": \"250-word SMART outcomes with specific numbers and timeframes\",\\n  \"evaluationPlan\": \"200-word plan for measuring success and reporting back to funder\",\\n  \"organisationalCapacity\": \"200-word demonstration of why this org is qualified to deliver\",\\n  \"budgetNarrative\": \"200-word justification of the requested amount and budget breakdown\",\\n  \"sustainability\": \"150-word plan for how project continues after grant period\",\\n  \"coverLetter\": \"300-word professional cover letter to the funder\",\\n  \"titleOptions\": [\"3 alternative project title options that are engaging and keyword-rich\"]\\n}' }] }) }}"
+            }
+        },
+        {
+            "id": "p13-n10",
+            "name": "Parse Proposal Sections",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                -180
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst org = $('Parse Eligibility Result').item.json;\nlet proposal;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  proposal = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  proposal = { executiveSummary: 'Parse error — regenerate', problemStatement: '', projectDescription: '', methodology: '', expectedOutcomes: '', evaluationPlan: '', organisationalCapacity: '', budgetNarrative: '', sustainability: '', coverLetter: '', titleOptions: [org.projectTitle] };\n}\nreturn {\n  json: {\n    ...org,\n    proposal_executiveSummary: proposal.executiveSummary || '',\n    proposal_problemStatement: proposal.problemStatement || '',\n    proposal_projectDescription: proposal.projectDescription || '',\n    proposal_methodology: proposal.methodology || '',\n    proposal_expectedOutcomes: proposal.expectedOutcomes || '',\n    proposal_evaluationPlan: proposal.evaluationPlan || '',\n    proposal_organisationalCapacity: proposal.organisationalCapacity || '',\n    proposal_budgetNarrative: proposal.budgetNarrative || '',\n    proposal_sustainability: proposal.sustainability || '',\n    proposal_coverLetter: proposal.coverLetter || '',\n    titleOptions: proposal.titleOptions || [org.projectTitle],\n    wordCount: Object.values(proposal).filter(v => typeof v === 'string').join(' ').split(' ').length\n  }\n};"
+            }
+        },
+        {
+            "id": "p13-n11",
+            "name": "Google Docs - Create Proposal Document",
+            "type": "n8n-nodes-base.googleDocs",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                -280
+            ],
+            "parameters": {
+                "operation": "create",
+                "title": "={{ $json.applicationId + ' — ' + $json.orgName + ' — ' + $json.projectTitle + ' — DRAFT' }}",
+                "folderId": "{{GOOGLE_DRIVE_GRANTS_FOLDER_ID}}",
+                "content": "={{ '# GRANT PROPOSAL — DRAFT\\n\\n**Application ID:** ' + $json.applicationId + '\\n**Organisation:** ' + $json.orgName + '\\n**Project:** ' + $json.projectTitle + '\\n**Funder:** ' + $json.grantFunder + '\\n**Amount Requested:** $' + $json.amountRequested + '\\n**Submission Deadline:** ' + $json.grantDeadline + '\\n**Eligibility Score:** ' + $json.eligibilityScore + '/100\\n\\n---\\n\\n## COVER LETTER\\n\\n' + $json.proposal_coverLetter + '\\n\\n---\\n\\n## EXECUTIVE SUMMARY\\n\\n' + $json.proposal_executiveSummary + '\\n\\n---\\n\\n## PROBLEM STATEMENT\\n\\n' + $json.proposal_problemStatement + '\\n\\n---\\n\\n## PROJECT DESCRIPTION\\n\\n' + $json.proposal_projectDescription + '\\n\\n---\\n\\n## METHODOLOGY & TIMELINE\\n\\n' + $json.proposal_methodology + '\\n\\n---\\n\\n## EXPECTED OUTCOMES\\n\\n' + $json.proposal_expectedOutcomes + '\\n\\n---\\n\\n## EVALUATION PLAN\\n\\n' + $json.proposal_evaluationPlan + '\\n\\n---\\n\\n## ORGANISATIONAL CAPACITY\\n\\n' + $json.proposal_organisationalCapacity + '\\n\\n---\\n\\n## BUDGET NARRATIVE\\n\\n' + $json.proposal_budgetNarrative + '\\n\\n---\\n\\n## SUSTAINABILITY\\n\\n' + $json.proposal_sustainability + '\\n\\n---\\n\\n## CONSULTANT NOTES\\n\\n**Winning Angle:** ' + $json.winningAngle + '\\n**Keywords to Mirror:** ' + $json.keywordsToUse.join(\\', \\') + '\\n**Weaknesses to Address:** ' + $json.weaknesses.join(\\'; \\') + '\\n**Alternative Title Options:** ' + ($json.titleOptions || []).join(\\' | \\') + '\\n\\n*Generated by AI Grant Writer — requires human review before submission*' }}"
+            }
+        },
+        {
+            "id": "p13-n12",
+            "name": "Notion - Create Grant Tracking Page",
+            "type": "n8n-nodes-base.notion",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                -60
+            ],
+            "parameters": {
+                "resource": "page",
+                "operation": "create",
+                "databaseId": "{{NOTION_GRANTS_DB_ID}}",
+                "title": "={{ $json.applicationId + ': ' + $json.orgName + ' → ' + $json.grantFunder }}",
+                "propertiesUi": {
+                    "propertyValues": [
+                        {
+                            "key": "Application ID",
+                            "type": "richText",
+                            "textValue": "={{ $json.applicationId }}"
+                        },
+                        {
+                            "key": "Organisation",
+                            "type": "richText",
+                            "textValue": "={{ $json.orgName }}"
+                        },
+                        {
+                            "key": "Project Title",
+                            "type": "richText",
+                            "textValue": "={{ $json.projectTitle }}"
+                        },
+                        {
+                            "key": "Funder",
+                            "type": "richText",
+                            "textValue": "={{ $json.grantFunder }}"
+                        },
+                        {
+                            "key": "Amount Requested",
+                            "type": "number",
+                            "numberValue": "={{ $json.amountRequested }}"
+                        },
+                        {
+                            "key": "Deadline",
+                            "type": "richText",
+                            "textValue": "={{ $json.grantDeadline }}"
+                        },
+                        {
+                            "key": "Eligibility Score",
+                            "type": "number",
+                            "numberValue": "={{ $json.eligibilityScore }}"
+                        },
+                        {
+                            "key": "Contact Email",
+                            "type": "email",
+                            "emailValue": "={{ $json.contactEmail }}"
+                        },
+                        {
+                            "key": "Status",
+                            "type": "select",
+                            "selectValue": "Draft Generated"
+                        },
+                        {
+                            "key": "Word Count",
+                            "type": "number",
+                            "numberValue": "={{ $json.wordCount }}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p13-n13",
+            "name": "Gmail - Send Draft to Applicant",
+            "type": "n8n-nodes-base.gmail",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                -280
+            ],
+            "parameters": {
+                "operation": "send",
+                "toList": "={{ $json.contactEmail }}",
+                "subject": "={{ 'Your Grant Proposal Draft is Ready — ' + $json.projectTitle + ' [' + $json.applicationId + ']' }}",
+                "message": "={{ '<p>Dear ' + $json.contactName + ',</p><p>Great news! Your AI-drafted grant proposal for <strong>' + $json.projectTitle + '</strong> (applying to <strong>' + $json.grantFunder + '</strong>) is ready for your review.</p><p><strong>Eligibility Assessment:</strong> ' + $json.eligibilityScore + '/100 — ' + $json.eligibilityReason + '</p><p><strong>What has been drafted:</strong></p><ul><li>Cover Letter</li><li>Executive Summary</li><li>Problem Statement</li><li>Project Description</li><li>Methodology & Timeline</li><li>Expected Outcomes</li><li>Evaluation Plan</li><li>Organisational Capacity</li><li>Budget Narrative</li><li>Sustainability Plan</li></ul><p><strong>Next Steps:</strong><br>1. Review all sections carefully — the AI draft is a starting point<br>2. Add specific data, statistics, and quotes where indicated<br>3. Adjust the budget narrative to match your actual figures<br>4. Our consultant will contact you within 2 business days for a review call<br>5. Submission deadline: <strong>' + $json.grantDeadline + '</strong></p><p>Application ID: ' + $json.applicationId + '</p><p>Best regards,<br>Grant Services Team</p>' }}",
+                "options": {}
+            }
+        },
+        {
+            "id": "p13-n14",
+            "name": "Slack - New Proposal Alert to Grant Team",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                -60
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "grant-proposals"
+                },
+                "text": "=:writing_hand: *New Grant Proposal Generated*\n\n*Application ID:* {{ $json.applicationId }}\n*Organisation:* {{ $json.orgName }} ({{ $json.orgType }})\n*Project:* {{ $json.projectTitle }}\n*Funder:* {{ $json.grantFunder }}\n*Amount Requested:* ${{ $json.amountRequested }}\n*Deadline:* {{ $json.grantDeadline }}\n\n:bar_chart: *Eligibility Score:* {{ $json.eligibilityScore }}/100\n*Winning Angle:* {{ $json.winningAngle }}\n\n:warning: *Weaknesses to Address:*\n{{ ($json.weaknesses || []).map(w => '• ' + w).join('\\n') }}\n\n✅ Google Doc draft created\n✅ Draft emailed to {{ $json.contactEmail }}\n✅ Notion tracking page created\n\n*Contact:* {{ $json.contactName }} — {{ $json.contactEmail }}\n*Word Count:* ~{{ $json.wordCount }} words",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Typeform - Grant Intake Submission": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Organisation Profile",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Organisation Profile": {
+            "main": [
+                [
+                    {
+                        "node": "Firecrawl - Scrape Grant Funder Page",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Firecrawl - Scrape Grant Funder Page": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Grant Criteria",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Grant Criteria": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Eligibility Assessment",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Eligibility Assessment": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Eligibility Result",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Eligibility Result": {
+            "main": [
+                [
+                    {
+                        "node": "Eligibility Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Eligibility Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Write Full Grant Proposal",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Gmail - Ineligibility Notice",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Write Full Grant Proposal": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Proposal Sections",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Proposal Sections": {
+            "main": [
+                [
+                    {
+                        "node": "Google Docs - Create Proposal Document",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Notion - Create Grant Tracking Page",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Google Docs - Create Proposal Document": {
+            "main": [
+                [
+                    {
+                        "node": "Gmail - Send Draft to Applicant",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Notion - Create Grant Tracking Page": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - New Proposal Alert to Grant Team",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
