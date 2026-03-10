@@ -1,0 +1,515 @@
+{
+    "name": "AI Legal Due Diligence Assistant",
+    "nodes": [
+        {
+            "id": "p14-n1",
+            "name": "Google Drive - New Doc Batch Trigger",
+            "type": "n8n-nodes-base.googleDriveTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "event": "fileCreated",
+                "folderId": "{{GOOGLE_DRIVE_DUE_DILIGENCE_FOLDER_ID}}",
+                "options": {}
+            }
+        },
+        {
+            "id": "p14-n2",
+            "name": "Extract DD Session Metadata",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const file = $input.item.json;\n\n// Derive matter ID from folder name or file naming convention\n// Convention: [MATTER-ID]_DocumentName.pdf e.g. DD-2026-001_SPA_Draft.pdf\nconst fileNameMatch = file.name?.match(/^([A-Z]{2}-\\d{4}-\\d{3})_(.+)$/);\nconst matterId = fileNameMatch?.[1] || 'DD-' + new Date().getFullYear() + '-' + Math.floor(Math.random() * 999).toString().padStart(3, '0');\nconst cleanName = fileNameMatch?.[2]?.replace(/\\.[^.]+$/, '') || file.name?.replace(/\\.[^.]+$/, '');\n\nreturn {\n  json: {\n    fileId: file.id,\n    fileName: file.name,\n    cleanDocName: cleanName,\n    matterId,\n    mimeType: file.mimeType || 'application/pdf',\n    fileSize: file.size,\n    uploadedAt: file.createdTime || new Date().toISOString(),\n    processedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p14-n3",
+            "name": "Download Document",
+            "type": "n8n-nodes-base.googleDrive",
+            "typeVersion": 3,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "operation": "download",
+                "fileId": "={{ $json.fileId }}",
+                "options": {
+                    "mimeType": "application/pdf"
+                }
+            }
+        },
+        {
+            "id": "p14-n4",
+            "name": "LlamaParse - Extract Document Text",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.cloud.llamaindex.ai/api/parsing/upload",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{LLAMAPARSE_API_KEY}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "multipart-form-data",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "file",
+                            "value": "={{ $binary.data }}",
+                            "parameterType": "formBinaryData"
+                        },
+                        {
+                            "name": "language",
+                            "value": "en"
+                        },
+                        {
+                            "name": "parsing_instruction",
+                            "value": "This is a legal due diligence document. Extract all text verbatim including: party names, dates, dollar amounts, defined terms, covenants, warranties, representations, indemnities, termination clauses, IP assignments, employment obligations, and any schedules or exhibits. Preserve all section numbering and headings."
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p14-n5",
+            "name": "Wait for Parse Job",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1,
+            "position": [
+                880,
+                0
+            ],
+            "webhookId": "dd-llamaparse-wait",
+            "parameters": {
+                "amount": 30,
+                "unit": "seconds"
+            }
+        },
+        {
+            "id": "p14-n6",
+            "name": "Fetch Parsed Text",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "url": "=https://api.cloud.llamaindex.ai/api/parsing/job/{{ $('LlamaParse - Extract Document Text').item.json.id }}/result/markdown",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{LLAMAPARSE_API_KEY}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p14-n7",
+            "name": "Claude - Document Intelligence Analysis",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1320,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 3000, temperature: 0.1, system: 'You are a senior M&A lawyer and due diligence specialist with expertise across corporate law, IP, employment, finance, and real estate. Analyse legal documents with precision. Flag every risk — do not downplay issues. Return only valid JSON.', messages: [{ role: 'user', content: 'Perform due diligence analysis on this document.\\n\\nDOCUMENT NAME: ' + $('Extract DD Session Metadata').item.json.cleanDocName + '\\nMATTER ID: ' + $('Extract DD Session Metadata').item.json.matterId + '\\n\\nDOCUMENT TEXT (first 12000 chars):\\n' + ($json.markdown || $json.text || JSON.stringify($json)).substring(0, 12000) + '\\n\\nReturn ONLY this JSON:\\n{\\n  \"documentType\": \"SPA|SHA|Employment Agreement|IP Assignment|NDA|Lease|Loan Agreement|Financial Statement|Corporate Record|Property Title|Other\",\\n  \"documentSummary\": \"2-sentence plain English summary\",\\n  \"partiesIdentified\": [{\"name\": \"...\", \"role\": \"Buyer|Seller|Guarantor|Lender|Borrower|Other\"}],\\n  \"keyDates\": [{\"description\": \"...\", \"date\": \"YYYY-MM-DD or as stated\"}],\\n  \"keyFinancialTerms\": [{\"description\": \"...\", \"amount\": \"...\", \"currency\": \"...\"}],\\n  \"redFlags\": [{\"severity\": \"CRITICAL|HIGH|MEDIUM|LOW\", \"clause\": \"clause reference or section\", \"issue\": \"what the concern is\", \"recommendation\": \"what to do about it\"}],\\n  \"missingProvisions\": [\"standard clauses that should be present but are absent\"],\\n  \"favourableTerms\": [\"terms that benefit the acquiring/advising party\"],\\n  \"ipConsiderations\": \"key IP issues or assignments identified — or None\",\\n  \"employmentObligations\": \"key employment-related obligations — or None\",\\n  \"regulatoryIssues\": \"any regulatory compliance concerns — or None\",\\n  \"overallRiskRating\": \"CRITICAL|HIGH|MEDIUM|LOW\",\\n  \"riskRatingSummary\": \"1-sentence explanation of overall risk rating\",\\n  \"immediateActions\": [\"actions needed before proceeding with transaction\"]\\n}' }] }) }}"
+            }
+        },
+        {
+            "id": "p14-n8",
+            "name": "Parse Document Analysis",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst meta = $('Extract DD Session Metadata').item.json;\nlet analysis;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  analysis = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  analysis = { documentType: 'Other', documentSummary: 'Parse error — manual review required', partiesIdentified: [], keyDates: [], keyFinancialTerms: [], redFlags: [{ severity: 'HIGH', clause: 'Parse Error', issue: 'Could not parse AI analysis — manual review essential', recommendation: 'Review document manually' }], missingProvisions: [], favourableTerms: [], overallRiskRating: 'HIGH', riskRatingSummary: 'Auto-analysis failed', immediateActions: ['Review document manually'] };\n}\n\nconst criticalFlags = (analysis.redFlags || []).filter(f => f.severity === 'CRITICAL').length;\nconst highFlags = (analysis.redFlags || []).filter(f => f.severity === 'HIGH').length;\n\nreturn {\n  json: {\n    matterId: meta.matterId,\n    fileId: meta.fileId,\n    fileName: meta.fileName,\n    cleanDocName: meta.cleanDocName,\n    processedAt: meta.processedAt,\n    documentType: analysis.documentType || 'Other',\n    documentSummary: analysis.documentSummary || '',\n    partiesIdentified: analysis.partiesIdentified || [],\n    keyDates: analysis.keyDates || [],\n    keyFinancialTerms: analysis.keyFinancialTerms || [],\n    redFlags: analysis.redFlags || [],\n    missingProvisions: analysis.missingProvisions || [],\n    favourableTerms: analysis.favourableTerms || [],\n    ipConsiderations: analysis.ipConsiderations || 'None',\n    employmentObligations: analysis.employmentObligations || 'None',\n    regulatoryIssues: analysis.regulatoryIssues || 'None',\n    overallRiskRating: analysis.overallRiskRating || 'MEDIUM',\n    riskRatingSummary: analysis.riskRatingSummary || '',\n    immediateActions: analysis.immediateActions || [],\n    criticalFlagCount: criticalFlags,\n    highFlagCount: highFlags,\n    totalFlagCount: (analysis.redFlags || []).length\n  }\n};"
+            }
+        },
+        {
+            "id": "p14-n9",
+            "name": "OpenAI - Embed Document for RAG",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.openai.com/v1/embeddings",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{OPENAI_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'text-embedding-3-small', input: $json.documentType + ': ' + $json.documentSummary + '. Risk: ' + $json.overallRiskRating + '. Issues: ' + ($json.redFlags || []).map(f => f.issue).join('. ') }) }}"
+            }
+        },
+        {
+            "id": "p14-n10",
+            "name": "Pinecone - Store Document Analysis",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1980,
+                0
+            ],
+            "parameters": {
+                "url": "https://{{PINECONE_INDEX_HOST}}/upsert",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Api-Key",
+                            "value": "{{PINECONE_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ vectors: [{ id: $('Parse Document Analysis').item.json.fileId, values: $json.data[0].embedding, metadata: { matterId: $('Parse Document Analysis').item.json.matterId, documentType: $('Parse Document Analysis').item.json.documentType, documentSummary: $('Parse Document Analysis').item.json.documentSummary, overallRiskRating: $('Parse Document Analysis').item.json.overallRiskRating, totalFlagCount: $('Parse Document Analysis').item.json.totalFlagCount, criticalFlagCount: $('Parse Document Analysis').item.json.criticalFlagCount, fileName: $('Parse Document Analysis').item.json.fileName } }], namespace: 'due-diligence' }) }}"
+            }
+        },
+        {
+            "id": "p14-n11",
+            "name": "Critical Flag Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $('Parse Document Analysis').item.json.criticalFlagCount }}",
+                            "rightValue": 0,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gt"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p14-n12",
+            "name": "Slack - CRITICAL Risk Immediate Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                -180
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "legal-critical-flags"
+                },
+                "text": "={{ ':rotating_light: *CRITICAL RISK FLAG — IMMEDIATE REVIEW REQUIRED*\\n\\n*Matter ID:* ' + $('Parse Document Analysis').item.json.matterId + '\\n*Document:* ' + $('Parse Document Analysis').item.json.cleanDocName + '\\n*Document Type:* ' + $('Parse Document Analysis').item.json.documentType + '\\n*Overall Risk:* ' + $('Parse Document Analysis').item.json.overallRiskRating + '\\n\\n:red_circle: *CRITICAL FLAGS (' + $('Parse Document Analysis').item.json.criticalFlagCount + '):*\\n' + ($('Parse Document Analysis').item.json.redFlags || []).filter(f => f.severity === 'CRITICAL').map(f => '• [' + f.clause + ']: ' + f.issue + '\\n  → ' + f.recommendation).join('\\n') + '\\n\\n:orange_circle: *HIGH FLAGS (' + $('Parse Document Analysis').item.json.highFlagCount + '):*\\n' + ($('Parse Document Analysis').item.json.redFlags || []).filter(f => f.severity === 'HIGH').slice(0, 3).map(f => '• ' + f.issue).join('\\n') + '\\n\\n*Immediate Actions:*\\n' + ($('Parse Document Analysis').item.json.immediateActions || []).map(a => '• ' + a).join('\\n') }}",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p14-n13",
+            "name": "Google Docs - Create Document Analysis Report",
+            "type": "n8n-nodes-base.googleDocs",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                80
+            ],
+            "parameters": {
+                "operation": "create",
+                "title": "={{ $('Parse Document Analysis').item.json.matterId + ' — ' + $('Parse Document Analysis').item.json.cleanDocName + ' — DD Analysis' }}",
+                "folderId": "{{GOOGLE_DRIVE_DD_REPORTS_FOLDER_ID}}",
+                "content": "={{ '# DUE DILIGENCE DOCUMENT ANALYSIS\\n\\n**Matter ID:** ' + $('Parse Document Analysis').item.json.matterId + '\\n**Document:** ' + $('Parse Document Analysis').item.json.cleanDocName + '\\n**Document Type:** ' + $('Parse Document Analysis').item.json.documentType + '\\n**Processed:** ' + $('Parse Document Analysis').item.json.processedAt + '\\n**Overall Risk Rating:** ' + $('Parse Document Analysis').item.json.overallRiskRating + '\\n\\n---\\n\\n## Document Summary\\n\\n' + $('Parse Document Analysis').item.json.documentSummary + '\\n\\n*' + $('Parse Document Analysis').item.json.riskRatingSummary + '*\\n\\n---\\n\\n## Parties Identified\\n\\n' + ($('Parse Document Analysis').item.json.partiesIdentified || []).map(p => '- **' + p.name + '** (' + p.role + ')').join('\\n') + '\\n\\n---\\n\\n## Key Financial Terms\\n\\n' + ($('Parse Document Analysis').item.json.keyFinancialTerms || []).map(f => '- ' + f.description + ': ' + f.currency + ' ' + f.amount).join('\\n') + '\\n\\n---\\n\\n## Key Dates\\n\\n' + ($('Parse Document Analysis').item.json.keyDates || []).map(d => '- ' + d.description + ': ' + d.date).join('\\n') + '\\n\\n---\\n\\n## RED FLAGS (' + $('Parse Document Analysis').item.json.totalFlagCount + ' total)\\n\\n' + ($('Parse Document Analysis').item.json.redFlags || []).map(f => '### [' + f.severity + '] — Clause: ' + f.clause + '\\n**Issue:** ' + f.issue + '\\n**Recommendation:** ' + f.recommendation).join('\\n\\n') + '\\n\\n---\\n\\n## Missing Provisions\\n\\n' + ($('Parse Document Analysis').item.json.missingProvisions || []).map(m => '- ' + m).join('\\n') + '\\n\\n---\\n\\n## Favourable Terms\\n\\n' + ($('Parse Document Analysis').item.json.favourableTerms || []).map(f => '- ' + f).join('\\n') + '\\n\\n---\\n\\n## Specialist Notes\\n\\n**IP Considerations:** ' + $('Parse Document Analysis').item.json.ipConsiderations + '\\n\\n**Employment Obligations:** ' + $('Parse Document Analysis').item.json.employmentObligations + '\\n\\n**Regulatory Issues:** ' + $('Parse Document Analysis').item.json.regulatoryIssues + '\\n\\n---\\n\\n## Immediate Actions Required\\n\\n' + ($('Parse Document Analysis').item.json.immediateActions || []).map((a, i) => (i+1) + '. ' + a).join('\\n') + '\\n\\n---\\n\\n*Generated by AI Due Diligence System — Must be reviewed by qualified legal counsel before reliance*' }}"
+            }
+        },
+        {
+            "id": "p14-n14",
+            "name": "Airtable - Log to DD Register",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                80
+            ],
+            "parameters": {
+                "operation": "create",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_DD_REGISTER_TABLE}}",
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Matter ID": "={{ $('Parse Document Analysis').item.json.matterId }}",
+                        "Document Name": "={{ $('Parse Document Analysis').item.json.cleanDocName }}",
+                        "Document Type": "={{ $('Parse Document Analysis').item.json.documentType }}",
+                        "Overall Risk": "={{ $('Parse Document Analysis').item.json.overallRiskRating }}",
+                        "Critical Flags": "={{ $('Parse Document Analysis').item.json.criticalFlagCount }}",
+                        "High Flags": "={{ $('Parse Document Analysis').item.json.highFlagCount }}",
+                        "Total Flags": "={{ $('Parse Document Analysis').item.json.totalFlagCount }}",
+                        "Summary": "={{ $('Parse Document Analysis').item.json.documentSummary }}",
+                        "Immediate Actions": "={{ ($('Parse Document Analysis').item.json.immediateActions || []).join('; ') }}",
+                        "Processed At": "={{ $('Parse Document Analysis').item.json.processedAt }}",
+                        "Status": "Under Review"
+                    }
+                }
+            }
+        },
+        {
+            "id": "p14-n15",
+            "name": "Slack - Document Processed Notification",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2860,
+                80
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "due-diligence"
+                },
+                "text": "={{ (':white_check_mark: *Document Analysed — ' + $('Parse Document Analysis').item.json.overallRiskRating + ' RISK*\\n\\n*Matter ID:* ' + $('Parse Document Analysis').item.json.matterId + '\\n*Document:* ' + $('Parse Document Analysis').item.json.cleanDocName + '\\n*Type:* ' + $('Parse Document Analysis').item.json.documentType + '\\n\\n*Risk Flags:* ' + $('Parse Document Analysis').item.json.criticalFlagCount + ' CRITICAL | ' + $('Parse Document Analysis').item.json.highFlagCount + ' HIGH | ' + $('Parse Document Analysis').item.json.totalFlagCount + ' total\\n\\n*Summary:* ' + $('Parse Document Analysis').item.json.documentSummary + '\\n\\n_Google Doc analysis report created._\\n_Stored in Pinecone for matter-level RAG queries._') }}",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Google Drive - New Doc Batch Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Extract DD Session Metadata",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract DD Session Metadata": {
+            "main": [
+                [
+                    {
+                        "node": "Download Document",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Download Document": {
+            "main": [
+                [
+                    {
+                        "node": "LlamaParse - Extract Document Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "LlamaParse - Extract Document Text": {
+            "main": [
+                [
+                    {
+                        "node": "Wait for Parse Job",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait for Parse Job": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Parsed Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Parsed Text": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Document Intelligence Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Document Intelligence Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Document Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Document Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "OpenAI - Embed Document for RAG",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "OpenAI - Embed Document for RAG": {
+            "main": [
+                [
+                    {
+                        "node": "Pinecone - Store Document Analysis",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Pinecone - Store Document Analysis": {
+            "main": [
+                [
+                    {
+                        "node": "Critical Flag Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Critical Flag Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - CRITICAL Risk Immediate Alert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Google Docs - Create Document Analysis Report",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Slack - CRITICAL Risk Immediate Alert": {
+            "main": [
+                [
+                    {
+                        "node": "Google Docs - Create Document Analysis Report",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Google Docs - Create Document Analysis Report": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Log to DD Register",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Log to DD Register": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Document Processed Notification",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
