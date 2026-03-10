@@ -1,0 +1,497 @@
+{
+    "name": "AI E-commerce Order Intelligence & Churn Predictor",
+    "nodes": [
+        {
+            "id": "p12-n1",
+            "name": "Shopify - Order Webhook",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 2,
+            "webhookId": "shopify-order-webhook",
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "shopify-order",
+                "responseMode": "responseNode",
+                "options": {}
+            }
+        },
+        {
+            "id": "p12-n2",
+            "name": "Respond to Shopify",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1,
+            "position": [
+                220,
+                200
+            ],
+            "parameters": {
+                "options": {
+                    "responseCode": 200
+                }
+            }
+        },
+        {
+            "id": "p12-n3",
+            "name": "Extract Order & Customer",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const order = $input.item.json;\nconst customer = order.customer || {};\n\nreturn {\n  json: {\n    orderId: order.id,\n    orderNumber: order.order_number,\n    orderTotal: parseFloat(order.total_price || 0),\n    orderCurrency: order.currency || 'USD',\n    orderStatus: order.financial_status || 'unknown',\n    customerId: customer.id,\n    customerEmail: customer.email || '',\n    customerFirstName: customer.first_name || 'Customer',\n    customerLastName: customer.last_name || '',\n    customerPhone: customer.phone || '',\n    totalOrderCount: customer.orders_count || 1,\n    totalSpend: parseFloat(customer.total_spent || 0),\n    customerTags: customer.tags || '',\n    customerCreatedAt: customer.created_at || '',\n    lineItems: (order.line_items || []).map(i => ({ name: i.name, qty: i.quantity, price: parseFloat(i.price) })),\n    orderCreatedAt: order.created_at || new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p12-n4",
+            "name": "Shopify - Fetch Order History",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "url": "=https://{{SHOPIFY_STORE_NAME}}.myshopify.com/admin/api/2024-01/customers/{{ $json.customerId }}/orders.json",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "X-Shopify-Access-Token",
+                            "value": "{{SHOPIFY_ACCESS_TOKEN}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "status",
+                            "value": "any"
+                        },
+                        {
+                            "name": "limit",
+                            "value": "50"
+                        },
+                        {
+                            "name": "fields",
+                            "value": "id,order_number,total_price,created_at,financial_status,line_items"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p12-n5",
+            "name": "Calculate Customer Metrics",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const orders = $input.item.json.orders || [];\nconst current = $('Extract Order & Customer').item.json;\nconst today = new Date();\n\n// Core metrics\nconst paidOrders = orders.filter(o => o.financial_status === 'paid');\nconst totalOrders = paidOrders.length;\nconst totalRevenue = paidOrders.reduce((sum, o) => sum + parseFloat(o.total_price || 0), 0);\nconst aov = totalOrders > 0 ? totalRevenue / totalOrders : 0;\n\n// Recency — days since last purchase\nconst sortedOrders = paidOrders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));\nconst lastOrderDate = sortedOrders[0] ? new Date(sortedOrders[0].created_at) : null;\nconst daysSinceLastOrder = lastOrderDate ? Math.floor((today - lastOrderDate) / (1000 * 60 * 60 * 24)) : 9999;\n\n// Frequency — avg days between orders\nlet avgDaysBetweenOrders = 0;\nif (sortedOrders.length > 1) {\n  const intervals = [];\n  for (let i = 0; i < sortedOrders.length - 1; i++) {\n    const diff = Math.abs(new Date(sortedOrders[i].created_at) - new Date(sortedOrders[i+1].created_at)) / (1000 * 60 * 60 * 24);\n    intervals.push(diff);\n  }\n  avgDaysBetweenOrders = intervals.reduce((a, b) => a + b, 0) / intervals.length;\n}\n\n// Predicted LTV (simple 12-month projection)\nconst purchaseFrequencyPerYear = avgDaysBetweenOrders > 0 ? 365 / avgDaysBetweenOrders : 1;\nconst predictedAnnualLTV = aov * purchaseFrequencyPerYear;\n\n// RFM Churn Prediction\nlet churnRisk, segment;\nif (totalOrders >= 5 && daysSinceLastOrder <= 30 && aov >= 100) {\n  segment = 'Champion'; churnRisk = 'LOW';\n} else if (totalOrders >= 3 && daysSinceLastOrder <= 60) {\n  segment = 'Loyal'; churnRisk = 'LOW';\n} else if (totalOrders >= 2 && daysSinceLastOrder <= 90) {\n  segment = 'At-Risk'; churnRisk = 'MEDIUM';\n} else if (totalOrders >= 2 && daysSinceLastOrder > 90) {\n  segment = 'Lost'; churnRisk = 'HIGH';\n} else if (totalOrders === 1 && daysSinceLastOrder > 60) {\n  segment = 'One-Time Buyer'; churnRisk = 'HIGH';\n} else {\n  segment = 'New Customer'; churnRisk = 'LOW';\n}\n\nconst isVIP = totalRevenue >= 1000 || aov >= 250;\nconst productHistory = paidOrders.flatMap(o => (o.line_items || []).map(i => i.name)).slice(0, 10);\n\nreturn {\n  json: {\n    ...current,\n    totalOrders,\n    totalRevenue: Math.round(totalRevenue * 100) / 100,\n    aov: Math.round(aov * 100) / 100,\n    daysSinceLastOrder,\n    avgDaysBetweenOrders: Math.round(avgDaysBetweenOrders),\n    predictedAnnualLTV: Math.round(predictedAnnualLTV * 100) / 100,\n    purchaseFrequencyPerYear: Math.round(purchaseFrequencyPerYear * 10) / 10,\n    churnRisk,\n    segment,\n    isVIP,\n    productHistory,\n    metricsGeneratedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p12-n6",
+            "name": "Claude - Generate Personalised Retention Offer",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 800, temperature: 0.6, system: 'You are an expert e-commerce retention marketer. Write persuasive, personalised win-back and upsell messages based on customer purchase history and segment. Never use generic templates. Reference the customer\\'s actual product history when possible.', messages: [{ role: 'user', content: 'Generate retention/engagement content for this customer.\\n\\nCUSTOMER: ' + $json.customerFirstName + ' ' + $json.customerLastName + '\\nSEGMENT: ' + $json.segment + '\\nCHURN RISK: ' + $json.churnRisk + '\\nTOTAL ORDERS: ' + $json.totalOrders + '\\nTOTAL SPEND: ' + $json.orderCurrency + ' ' + $json.totalRevenue + '\\nAVG ORDER VALUE: ' + $json.orderCurrency + ' ' + $json.aov + '\\nDAYS SINCE LAST ORDER: ' + $json.daysSinceLastOrder + '\\nPRODUCTS PURCHASED: ' + $json.productHistory.join(\\', \\') + '\\n\\nReturn JSON only:\\n{\\n  \"emailSubject\": \"...\",\\n  \"emailBody\": \"Short HTML email (2-3 paragraphs) personalised to their purchase history and segment. Include a discount code if churn risk is HIGH.\",\\n  \"discountCode\": \"WINBACK20 if HIGH risk else null\",\\n  \"discountPercent\": 20 if HIGH risk else 0,\\n  \"smsMessage\": \"Under 160 chars, warm, personalised\",\\n  \"recommendedProducts\": [\"product type 1 they might like\", \"product type 2\"]\\n}' }] }) }}"
+            }
+        },
+        {
+            "id": "p12-n7",
+            "name": "Parse Retention Content",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst customer = $('Calculate Customer Metrics').item.json;\nlet retention;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  retention = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  retention = { emailSubject: 'We miss you!', emailBody: '<p>Hi ' + customer.customerFirstName + ', we would love to see you back.</p>', discountCode: null, discountPercent: 0, smsMessage: 'Hi! We miss you. Come back for 10% off.', recommendedProducts: [] };\n}\nreturn {\n  json: {\n    ...customer,\n    retentionEmailSubject: retention.emailSubject,\n    retentionEmailBody: retention.emailBody,\n    discountCode: retention.discountCode,\n    discountPercent: retention.discountPercent || 0,\n    retentionSms: retention.smsMessage,\n    recommendedProducts: retention.recommendedProducts || []\n  }\n};"
+            }
+        },
+        {
+            "id": "p12-n8",
+            "name": "Churn Risk Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1320,
+                -120
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.churnRisk }}",
+                            "rightValue": "LOW",
+                            "operator": {
+                                "type": "string",
+                                "operation": "notEquals"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p12-n9",
+            "name": "Klaviyo - Add to Retention Campaign",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1540,
+                -200
+            ],
+            "parameters": {
+                "url": "https://a.klaviyo.com/api/profile-import/",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Klaviyo-API-Key {{KLAVIYO_PRIVATE_KEY}}"
+                        },
+                        {
+                            "name": "revision",
+                            "value": "2024-07-15"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ data: { type: 'profile', attributes: { email: $json.customerEmail, first_name: $json.customerFirstName, last_name: $json.customerLastName, phone_number: $json.customerPhone || undefined, properties: { segment: $json.segment, churn_risk: $json.churnRisk, total_orders: $json.totalOrders, total_revenue: $json.totalRevenue, aov: $json.aov, days_since_last_order: $json.daysSinceLastOrder, predicted_annual_ltv: $json.predictedAnnualLTV, discount_code: $json.discountCode, retention_email_subject: $json.retentionEmailSubject, is_vip: $json.isVIP } } } }) }}"
+            }
+        },
+        {
+            "id": "p12-n10",
+            "name": "Shopify - Tag Customer with Segment",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "url": "=https://{{SHOPIFY_STORE_NAME}}.myshopify.com/admin/api/2024-01/customers/{{ $json.customerId }}.json",
+                "method": "PUT",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "X-Shopify-Access-Token",
+                            "value": "{{SHOPIFY_ACCESS_TOKEN}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ customer: { id: $json.customerId, tags: [$json.segment, $json.churnRisk + '-CHURN-RISK', $json.isVIP ? 'VIP' : '', 'ai-segmented'].filter(Boolean).join(', ') } }) }}"
+            }
+        },
+        {
+            "id": "p12-n11",
+            "name": "VIP Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.isVIP }}",
+                            "rightValue": true,
+                            "operator": {
+                                "type": "boolean",
+                                "operation": "equals"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p12-n12",
+            "name": "Slack - VIP Order Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                -120
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "vip-customers"
+                },
+                "text": "=:crown: *VIP Customer Order*\n\n*{{ $json.customerFirstName }} {{ $json.customerLastName }}*\n*Email:* {{ $json.customerEmail }}\n*Segment:* {{ $json.segment }}\n*This Order:* {{ $json.orderCurrency }} {{ $json.orderTotal }}\n*Total Lifetime Spend:* {{ $json.orderCurrency }} {{ $json.totalRevenue }}\n*Total Orders:* {{ $json.totalOrders }}\n*Avg Order Value:* {{ $json.orderCurrency }} {{ $json.aov }}\n*Predicted Annual LTV:* {{ $json.orderCurrency }} {{ $json.predictedAnnualLTV }}\n\n:shopping_bags: *Products this order:*\n{{ $json.lineItems.map(i => '• ' + i.name + ' × ' + i.qty + ' ($' + i.price + ')').join('\\n') }}",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p12-n13",
+            "name": "Slack - Churn Risk Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                -360
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "customer-churn-alerts"
+                },
+                "text": "=:rotating_light: *HIGH CHURN RISK CUSTOMER*\n\n*{{ $json.customerFirstName }} {{ $json.customerLastName }}* ({{ $json.customerEmail }})\n*Segment:* {{ $json.segment }}\n*Days Since Last Order:* {{ $json.daysSinceLastOrder }} days\n*Total Orders:* {{ $json.totalOrders }}\n*Total Spend:* {{ $json.orderCurrency }} {{ $json.totalRevenue }}\n*Predicted Annual LTV at Risk:* {{ $json.orderCurrency }} {{ $json.predictedAnnualLTV }}\n\n*AI Action:*\n• Added to Klaviyo win-back campaign\n• Discount code generated: {{ $json.discountCode }}\n• Customer tagged in Shopify: {{ $json.segment }}\n\n*Recommended Products:* {{ ($json.recommendedProducts || []).join(', ') }}",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p12-n14",
+            "name": "Airtable - Customer Intelligence Log",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                180
+            ],
+            "parameters": {
+                "operation": "create",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_CUSTOMERS_TABLE}}",
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Customer ID": "={{ $json.customerId }}",
+                        "Email": "={{ $json.customerEmail }}",
+                        "Full Name": "={{ $json.customerFirstName + ' ' + $json.customerLastName }}",
+                        "Segment": "={{ $json.segment }}",
+                        "Churn Risk": "={{ $json.churnRisk }}",
+                        "Is VIP": "={{ $json.isVIP ? 'Yes' : 'No' }}",
+                        "Total Orders": "={{ $json.totalOrders }}",
+                        "Total Revenue": "={{ $json.totalRevenue }}",
+                        "AOV": "={{ $json.aov }}",
+                        "Days Since Last Order": "={{ $json.daysSinceLastOrder }}",
+                        "Predicted Annual LTV": "={{ $json.predictedAnnualLTV }}",
+                        "Purchase Frequency (yr)": "={{ $json.purchaseFrequencyPerYear }}",
+                        "Retention Email Sent": "={{ $json.churnRisk !== 'LOW' ? 'Yes' : 'No' }}",
+                        "Discount Code": "={{ $json.discountCode || '' }}",
+                        "Last Analysed": "={{ $json.metricsGeneratedAt }}"
+                    }
+                }
+            }
+        }
+    ],
+    "connections": {
+        "Shopify - Order Webhook": {
+            "main": [
+                [
+                    {
+                        "node": "Respond to Shopify",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Extract Order & Customer",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Order & Customer": {
+            "main": [
+                [
+                    {
+                        "node": "Shopify - Fetch Order History",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Shopify - Fetch Order History": {
+            "main": [
+                [
+                    {
+                        "node": "Calculate Customer Metrics",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Calculate Customer Metrics": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Generate Personalised Retention Offer",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Generate Personalised Retention Offer": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Retention Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Retention Content": {
+            "main": [
+                [
+                    {
+                        "node": "Churn Risk Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Churn Risk Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Churn Risk Alert",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Klaviyo - Add to Retention Campaign",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Shopify - Tag Customer with Segment",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Slack - Churn Risk Alert": {
+            "main": [
+                [
+                    {
+                        "node": "Shopify - Tag Customer with Segment",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Klaviyo - Add to Retention Campaign": {
+            "main": [
+                [
+                    {
+                        "node": "Shopify - Tag Customer with Segment",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Shopify - Tag Customer with Segment": {
+            "main": [
+                [
+                    {
+                        "node": "VIP Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "VIP Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - VIP Order Alert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                []
+            ]
+        },
+        "Slack - VIP Order Alert": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Customer Intelligence Log",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
