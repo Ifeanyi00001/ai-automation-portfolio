@@ -1,0 +1,489 @@
+{
+    "name": "Property Valuation & ROI Engine",
+    "nodes": [
+        {
+            "id": "p4-n1",
+            "name": "Daily Schedule Trigger",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "hours",
+                            "hoursInterval": 24
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p4-n2",
+            "name": "Airtable - Read Property List",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "operation": "list",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_TABLE_ID}}",
+                "options": {
+                    "filterByFormula": "AND({Active}=1, OR({Last_Valued}='', DATETIME_DIFF(NOW(),{Last_Valued},'days')>=7))"
+                }
+            }
+        },
+        {
+            "id": "p4-n3",
+            "name": "Split Into Individual Properties",
+            "type": "n8n-nodes-base.splitInBatches",
+            "typeVersion": 3,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "batchSize": 1,
+                "options": {}
+            }
+        },
+        {
+            "id": "p4-n4",
+            "name": "Apify - Scrape Redfin Comparables",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.apify.com/v2/acts/maxcopell~zillow-scraper/runs",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{APIFY_API_TOKEN}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ startUrls: [{ url: 'https://www.zillow.com/homes/' + encodeURIComponent($json.fields.Address) + '_rb/' }], maxItems: 10, includeDetails: true }) }}"
+            }
+        },
+        {
+            "id": "p4-n5",
+            "name": "Wait for Apify Run (30s)",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1,
+            "position": [
+                880,
+                0
+            ],
+            "webhookId": "p4-apify-wait",
+            "parameters": {
+                "amount": 30,
+                "unit": "seconds"
+            }
+        },
+        {
+            "id": "p4-n6",
+            "name": "Apify - Fetch Scrape Results",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "url": "=https://api.apify.com/v2/acts/maxcopell~zillow-scraper/runs/{{ $('Apify - Scrape Redfin Comparables').item.json.data.id }}/dataset/items",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{APIFY_API_TOKEN}}"
+                        }
+                    ]
+                },
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "value": "10"
+                        },
+                        {
+                            "name": "fields",
+                            "value": "address,price,bedrooms,bathrooms,livingArea,yearBuilt,zestimate,rentZestimate"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p4-n7",
+            "name": "Google Maps - Distance to School",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1320,
+                -120
+            ],
+            "parameters": {
+                "url": "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+                "method": "GET",
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "location",
+                            "value": "={{ $('Airtable - Read Property List').item.json.fields.Lat + ',' + $('Airtable - Read Property List').item.json.fields.Lng }}"
+                        },
+                        {
+                            "name": "radius",
+                            "value": "3000"
+                        },
+                        {
+                            "name": "type",
+                            "value": "school"
+                        },
+                        {
+                            "name": "rankby",
+                            "value": "distance"
+                        },
+                        {
+                            "name": "key",
+                            "value": "{{GOOGLE_MAPS_API_KEY}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p4-n8",
+            "name": "Google Maps - Distance to Hospital",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1320,
+                120
+            ],
+            "parameters": {
+                "url": "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+                "method": "GET",
+                "sendQueryParameters": true,
+                "queryParameters": {
+                    "parameters": [
+                        {
+                            "name": "location",
+                            "value": "={{ $('Airtable - Read Property List').item.json.fields.Lat + ',' + $('Airtable - Read Property List').item.json.fields.Lng }}"
+                        },
+                        {
+                            "name": "radius",
+                            "value": "10000"
+                        },
+                        {
+                            "name": "type",
+                            "value": "hospital"
+                        },
+                        {
+                            "name": "rankby",
+                            "value": "distance"
+                        },
+                        {
+                            "name": "key",
+                            "value": "{{GOOGLE_MAPS_API_KEY}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p4-n9",
+            "name": "Merge Maps Results",
+            "type": "n8n-nodes-base.merge",
+            "typeVersion": 3,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "mode": "combine",
+                "combinationMode": "mergeByPosition",
+                "options": {}
+            }
+        },
+        {
+            "id": "p4-n10",
+            "name": "Calculate ROI Metrics",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1760,
+                0
+            ],
+            "parameters": {
+                "jsCode": "// Gather all context\nconst property = $('Airtable - Read Property List').item.json.fields;\nconst comparables = $('Apify - Fetch Scrape Results').item.json;\nconst schoolData = $('Google Maps - Distance to School').item.json.results?.[0];\nconst hospitalData = $('Google Maps - Distance to Hospital').item.json.results?.[0];\n\n// Calculate comparable stats\nconst prices = Array.isArray(comparables) ? comparables.map(c => c.price).filter(p => p > 0) : [];\nconst avgComparablePrice = prices.length > 0 ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;\nconst minPrice = prices.length > 0 ? Math.min(...prices) : 0;\nconst maxPrice = prices.length > 0 ? Math.max(...prices) : 0;\n\n// Get rent estimates\nconst rentEstimates = Array.isArray(comparables) ? comparables.map(c => c.rentZestimate).filter(r => r > 0) : [];\nconst avgRent = rentEstimates.length > 0 ? rentEstimates.reduce((a, b) => a + b, 0) / rentEstimates.length : 0;\n\n// Calculate proximity scores (closer = better)\nconst schoolDistance = schoolData?.geometry?.location ? 'Nearby' : 'Unknown';\nconst hospitalDistance = hospitalData?.geometry?.location ? 'Nearby' : 'Unknown';\nconst nearestSchool = schoolData?.name || 'Unknown';\nconst nearestHospital = hospitalData?.name || 'Unknown';\n\n// ROI calculations\nconst purchasePrice = property.Purchase_Price || avgComparablePrice;\nconst monthlyRent = avgRent || property.Estimated_Rent || 0;\nconst annualRent = monthlyRent * 12;\nconst annualExpenses = purchasePrice * 0.025; // 2.5% expenses estimate\nconst netOperatingIncome = annualRent - annualExpenses;\nconst capRate = purchasePrice > 0 ? (netOperatingIncome / purchasePrice) * 100 : 0;\nconst grossYield = purchasePrice > 0 ? (annualRent / purchasePrice) * 100 : 0;\nconst pricePerSqft = property.SqFt > 0 ? purchasePrice / property.SqFt : 0;\nconst marketPricePerSqft = property.SqFt > 0 ? avgComparablePrice / property.SqFt : 0;\nconst underOverValued = avgComparablePrice > 0 ? ((purchasePrice - avgComparablePrice) / avgComparablePrice * 100) : 0;\n\nreturn {\n  json: {\n    propertyAddress: property.Address,\n    propertyId: property.ID || 'N/A',\n    purchasePrice,\n    avgComparablePrice: Math.round(avgComparablePrice),\n    minComparablePrice: minPrice,\n    maxComparablePrice: maxPrice,\n    comparablesFound: prices.length,\n    avgMonthlyRent: Math.round(monthlyRent),\n    annualRent: Math.round(annualRent),\n    netOperatingIncome: Math.round(netOperatingIncome),\n    capRate: capRate.toFixed(2),\n    grossYield: grossYield.toFixed(2),\n    pricePerSqft: Math.round(pricePerSqft),\n    marketPricePerSqft: Math.round(marketPricePerSqft),\n    underOverValued: underOverValued.toFixed(1),\n    nearestSchool,\n    schoolDistance,\n    nearestHospital,\n    hospitalDistance,\n    valuedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p4-n11",
+            "name": "OpenAI - Generate Valuation Report",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1980,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.openai.com/v1/chat/completions",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{OPENAI_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'gpt-4o', max_tokens: 1200, temperature: 0.3, messages: [{ role: 'system', content: 'You are a senior real estate investment analyst. Write concise, data-driven property valuation reports that help investors make buy/hold/sell decisions.' }, { role: 'user', content: 'Write a property valuation report for: ' + JSON.stringify($json) + '. Include: 1) Executive Summary (3 sentences) 2) Market Position (undervalued/overvalued analysis) 3) Rental Yield Assessment 4) Location Score with school and hospital proximity 5) Investment Recommendation (BUY/HOLD/PASS with clear rationale). Format in markdown.' }] }) }}"
+            }
+        },
+        {
+            "id": "p4-n12",
+            "name": "Extract Report Text",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const report = $input.item.json.choices?.[0]?.message?.content || 'Report generation failed';\nconst metrics = $('Calculate ROI Metrics').item.json;\nconst recommendation = report.match(/\\b(BUY|HOLD|PASS)\\b/)?.[1] || 'REVIEW';\nreturn { json: { report, recommendation, ...metrics } };"
+            }
+        },
+        {
+            "id": "p4-n13",
+            "name": "Airtable - Update Property Record",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                0
+            ],
+            "parameters": {
+                "operation": "update",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_TABLE_ID}}",
+                "id": "={{ $('Airtable - Read Property List').item.json.id }}",
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Estimated_Value": "={{ $json.avgComparablePrice }}",
+                        "Cap_Rate": "={{ $json.capRate }}",
+                        "Gross_Yield": "={{ $json.grossYield }}",
+                        "Recommendation": "={{ $json.recommendation }}",
+                        "AI_Report": "={{ $json.report.substring(0, 1000) }}",
+                        "Last_Valued": "={{ $json.valuedAt }}",
+                        "Comparables_Found": "={{ $json.comparablesFound }}"
+                    }
+                }
+            }
+        },
+        {
+            "id": "p4-n14",
+            "name": "Slack - Valuation Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                0
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "property-valuations"
+                },
+                "text": "=:house: *Property Valuation Complete*\n\n*Address:* {{ $json.propertyAddress }}\n*Avg Comparable Price:* ${{ $json.avgComparablePrice.toLocaleString() }}\n*Cap Rate:* {{ $json.capRate }}%\n*Gross Yield:* {{ $json.grossYield }}%\n*Monthly Rent Estimate:* ${{ $json.avgMonthlyRent }}\n*Comparables Found:* {{ $json.comparablesFound }}\n*Market Position:* {{ $json.underOverValued }}% vs market\n*Nearest School:* {{ $json.nearestSchool }}\n *Nearest Hospital:* {{ $json.nearestHospital }}\n\n*Recommendation:* {{ $json.recommendation }}\n\n_Valued at: {{ $json.valuedAt }}_",
+                "otherOptions": {}
+            }
+        }
+    ],
+    "connections": {
+        "Daily Schedule Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Read Property List",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Read Property List": {
+            "main": [
+                [
+                    {
+                        "node": "Split Into Individual Properties",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Split Into Individual Properties": {
+            "main": [
+                [
+                    {
+                        "node": "Apify - Scrape Redfin Comparables",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Apify - Scrape Redfin Comparables": {
+            "main": [
+                [
+                    {
+                        "node": "Wait for Apify Run (30s)",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait for Apify Run (30s)": {
+            "main": [
+                [
+                    {
+                        "node": "Apify - Fetch Scrape Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Apify - Fetch Scrape Results": {
+            "main": [
+                [
+                    {
+                        "node": "Google Maps - Distance to School",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Google Maps - Distance to Hospital",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Google Maps - Distance to School": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Maps Results",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Google Maps - Distance to Hospital": {
+            "main": [
+                [
+                    {
+                        "node": "Merge Maps Results",
+                        "type": "main",
+                        "index": 1
+                    }
+                ]
+            ]
+        },
+        "Merge Maps Results": {
+            "main": [
+                [
+                    {
+                        "node": "Calculate ROI Metrics",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Calculate ROI Metrics": {
+            "main": [
+                [
+                    {
+                        "node": "OpenAI - Generate Valuation Report",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "OpenAI - Generate Valuation Report": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Report Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Report Text": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Update Property Record",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Update Property Record": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Valuation Alert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
