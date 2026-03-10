@@ -1,0 +1,562 @@
+{
+    "name": "AI Social Media Content Factory",
+    "nodes": [
+        {
+            "id": "p7-n1",
+            "name": "Daily Content Trigger",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "hours",
+                            "hoursInterval": 24
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p7-n2",
+            "name": "RSS - Pull Industry News",
+            "type": "n8n-nodes-base.rssFeedRead",
+            "typeVersion": 1,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "url": "https://feeds.feedburner.com/TechCrunch",
+                "options": {}
+            }
+        },
+        {
+            "id": "p7-n3",
+            "name": "Filter - Last 24 Hours Only",
+            "type": "n8n-nodes-base.filter",
+            "typeVersion": 2,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ new Date($json.isoDate || $json.pubDate).getTime() }}",
+                            "rightValue": "={{ new Date().getTime() - (24 * 60 * 60 * 1000) }}",
+                            "operator": {
+                                "type": "number",
+                                "operation": "gte"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p7-n4",
+            "name": "Limit to Top 3 Articles",
+            "type": "n8n-nodes-base.limit",
+            "typeVersion": 1,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "maxItems": 3
+            }
+        },
+        {
+            "id": "p7-n5",
+            "name": "Fetch Article Full Text",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                880,
+                0
+            ],
+            "parameters": {
+                "url": "https://r.jina.ai/={{ encodeURIComponent($json.link) }}",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Accept",
+                            "value": "text/plain"
+                        },
+                        {
+                            "name": "X-Return-Format",
+                            "value": "text"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p7-n6",
+            "name": "Prepare Article Context",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const rssItem = $('Limit to Top 3 Articles').item.json;\nconst fullText = $input.item.json.body || $input.item.json.data || $input.item.json;\nconst articleText = typeof fullText === 'string' ? fullText.substring(0, 4000) : JSON.stringify(fullText).substring(0, 4000);\n\nreturn {\n  json: {\n    title: rssItem.title || 'Untitled',\n    link: rssItem.link || '',\n    pubDate: rssItem.isoDate || rssItem.pubDate || new Date().toISOString(),\n    articleText,\n    source: new URL(rssItem.link || 'https://example.com').hostname\n  }\n};"
+            }
+        },
+        {
+            "id": "p7-n7",
+            "name": "Claude - Generate 4 Platform Posts",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1320,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 2000, temperature: 0.8, system: 'You are a social media strategist for a business process automation agency. You write content that educates, engages, and positions the brand as a thought leader. Each platform has a distinct voice. Never use generic filler. Always end posts with a strong hook or call-to-action. Avoid emojis that feel forced.', messages: [{ role: 'user', content: 'Based on this article, create 4 unique social media posts (one per platform). Return ONLY valid JSON.\\n\\nARTICLE TITLE: ' + $json.title + '\\nSOURCE: ' + $json.source + '\\nCONTENT:\\n' + $json.articleText + '\\n\\nReturn this exact JSON structure:\\n{\\n  \"linkedin\": {\"post\": \"250-300 word thought-leadership post with professional tone, 3 paragraphs, end with a question to drive comments\", \"hashtags\": [\"#tag1\", \"#tag2\", \"#tag3\"]},\\n  \"twitter\": {\"post\": \"max 280 chars, punchy, insight-first, ends with curiosity gap or opinion\", \"hashtags\": [\"#tag1\", \"#tag2\"]},\\n  \"instagram\": {\"caption\": \"150-200 word caption, conversational, story-format, strong hook in first line\", \"hashtags\": [\"#tag1\",\"#tag2\",\"#tag3\",\"#tag4\",\"#tag5\"]},\\n  \"facebook\": {\"post\": \"120-180 word post, slightly casual, ends with a share-worthy opinion or question\", \"hashtags\": [\"#tag1\", \"#tag2\"]},\\n  \"imagePrompt\": \"Detailed DALL-E 3 prompt to generate a professional social media visual that represents the core theme of this article. Style: modern, clean, suitable for business. No text in image.\",\\n  \"contentAngle\": \"one sentence describing the editorial angle used\"\\n}' }] }) }}"
+            }
+        },
+        {
+            "id": "p7-n8",
+            "name": "Parse Content JSON",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const raw = $input.item.json.content?.[0]?.text || '{}';\nconst article = $('Prepare Article Context').item.json;\nlet content;\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  content = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  content = { linkedin: { post: raw }, twitter: { post: raw.substring(0,280) }, instagram: { caption: raw }, facebook: { post: raw }, imagePrompt: 'Professional business automation graphic, modern, clean', contentAngle: 'General' };\n}\n\nreturn {\n  json: {\n    articleTitle: article.title,\n    articleLink: article.link,\n    articleSource: article.source,\n    pubDate: article.pubDate,\n    contentAngle: content.contentAngle || 'Thought leadership',\n    imagePrompt: content.imagePrompt || 'Modern business automation concept, professional, clean design',\n    linkedin: content.linkedin || {},\n    twitter: content.twitter || {},\n    instagram: content.instagram || {},\n    facebook: content.facebook || {},\n    generatedAt: new Date().toISOString()\n  }\n};"
+            }
+        },
+        {
+            "id": "p7-n9",
+            "name": "DALL-E 3 - Generate Post Image",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.openai.com/v1/images/generations",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{OPENAI_API_KEY}}"
+                        },
+                        {
+                            "name": "Content-Type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'dall-e-3', prompt: $json.imagePrompt + '. Style: Flat design, corporate, modern. No text, no logos. Aspect ratio: 1:1. High quality.', n: 1, size: '1024x1024', quality: 'standard', response_format: 'url' }) }}"
+            }
+        },
+        {
+            "id": "p7-n10",
+            "name": "Extract Image URL",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const imageUrl = $input.item.json.data?.[0]?.url || '';\nconst revisedPrompt = $input.item.json.data?.[0]?.revised_prompt || '';\nconst content = $('Parse Content JSON').item.json;\n\nreturn {\n  json: {\n    ...content,\n    imageUrl,\n    revisedImagePrompt: revisedPrompt\n  }\n};"
+            }
+        },
+        {
+            "id": "p7-n11",
+            "name": "Quality Check - All Posts Present",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.linkedin?.post?.length }}",
+                            "rightValue": 50,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gt"
+                            }
+                        },
+                        {
+                            "leftValue": "={{ $json.twitter?.post?.length }}",
+                            "rightValue": 10,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gt"
+                            }
+                        },
+                        {
+                            "leftValue": "={{ $json.imageUrl }}",
+                            "rightValue": "",
+                            "operator": {
+                                "type": "string",
+                                "operation": "notEquals"
+                            }
+                        }
+                    ],
+                    "combinator": "and"
+                }
+            }
+        },
+        {
+            "id": "p7-n12",
+            "name": "Buffer - Schedule LinkedIn Post",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2420,
+                -200
+            ],
+            "parameters": {
+                "url": "https://api.bufferapp.com/1/updates/create.json",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{BUFFER_ACCESS_TOKEN}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "form-urlencoded",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "profile_ids[]",
+                            "value": "{{BUFFER_LINKEDIN_PROFILE_ID}}"
+                        },
+                        {
+                            "name": "text",
+                            "value": "={{ $json.linkedin.post + '\\n\\n' + ($json.linkedin.hashtags || []).join(' ') }}"
+                        },
+                        {
+                            "name": "scheduled_at",
+                            "value": "={{ new Date(new Date().getTime() + 2*60*60*1000).toISOString() }}"
+                        },
+                        {
+                            "name": "media[photo]",
+                            "value": "={{ $json.imageUrl }}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p7-n13",
+            "name": "Buffer - Schedule Twitter Post",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                2420,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.bufferapp.com/1/updates/create.json",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{BUFFER_ACCESS_TOKEN}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "form-urlencoded",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "profile_ids[]",
+                            "value": "{{BUFFER_TWITTER_PROFILE_ID}}"
+                        },
+                        {
+                            "name": "text",
+                            "value": "={{ $json.twitter.post + ' ' + ($json.twitter.hashtags || []).join(' ') }}"
+                        },
+                        {
+                            "name": "scheduled_at",
+                            "value": "={{ new Date(new Date().getTime() + 4*60*60*1000).toISOString() }}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p7-n14",
+            "name": "Airtable - Log Content Calendar",
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2,
+            "position": [
+                2640,
+                -100
+            ],
+            "parameters": {
+                "operation": "create",
+                "baseId": "{{AIRTABLE_BASE_ID}}",
+                "tableId": "{{AIRTABLE_CONTENT_TABLE_ID}}",
+                "columns": {
+                    "mappingMode": "defineBelow",
+                    "value": {
+                        "Article Title": "={{ $json.articleTitle }}",
+                        "Article Source": "={{ $json.articleSource }}",
+                        "Article Link": "={{ $json.articleLink }}",
+                        "Content Angle": "={{ $json.contentAngle }}",
+                        "LinkedIn Post": "={{ $json.linkedin?.post?.substring(0, 500) }}",
+                        "Twitter Post": "={{ $json.twitter?.post }}",
+                        "Image URL": "={{ $json.imageUrl }}",
+                        "Status": "Scheduled",
+                        "Generated At": "={{ $json.generatedAt }}"
+                    }
+                }
+            }
+        },
+        {
+            "id": "p7-n15",
+            "name": "Slack - Content Preview for Approval",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2860,
+                -100
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "content-approvals"
+                },
+                "text": "=:art: *New Content Batch Ready*\n\n*Source Article:* <{{ $json.articleLink }}|{{ $json.articleTitle }}>\n*Content Angle:* {{ $json.contentAngle }}\n*Generated:* {{ $json.generatedAt }}\n\n:linkedin: *LinkedIn Preview:*\n```{{ $json.linkedin?.post?.substring(0, 300) }}...```\n\n:twitter: *Twitter:*\n```{{ $json.twitter?.post }}```\n\n:frame_with_picture: *Image:* {{ $json.imageUrl }}\n\n_Scheduled: LinkedIn in 2hrs, Twitter in 4hrs_\n_React :white_check_mark: to approve or :x: to cancel_",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p7-n16",
+            "name": "Log Rejected Content",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                200
+            ],
+            "parameters": {
+                "jsCode": "console.log('Content quality check FAILED:', { articleTitle: $json.articleTitle, linkedinLength: $json.linkedin?.post?.length, twitterLength: $json.twitter?.post?.length, hasImage: !!$json.imageUrl });\nreturn { json: { skipped: true, articleTitle: $json.articleTitle, reason: 'Content generation incomplete' } };"
+            }
+        }
+    ],
+    "connections": {
+        "Daily Content Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "RSS - Pull Industry News",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "RSS - Pull Industry News": {
+            "main": [
+                [
+                    {
+                        "node": "Filter - Last 24 Hours Only",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Filter - Last 24 Hours Only": {
+            "main": [
+                [
+                    {
+                        "node": "Limit to Top 3 Articles",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Limit to Top 3 Articles": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Article Full Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Article Full Text": {
+            "main": [
+                [
+                    {
+                        "node": "Prepare Article Context",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Prepare Article Context": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Generate 4 Platform Posts",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Generate 4 Platform Posts": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Content JSON",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Content JSON": {
+            "main": [
+                [
+                    {
+                        "node": "DALL-E 3 - Generate Post Image",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "DALL-E 3 - Generate Post Image": {
+            "main": [
+                [
+                    {
+                        "node": "Extract Image URL",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Extract Image URL": {
+            "main": [
+                [
+                    {
+                        "node": "Quality Check - All Posts Present",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Quality Check - All Posts Present": {
+            "main": [
+                [
+                    {
+                        "node": "Buffer - Schedule LinkedIn Post",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Log Rejected Content",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Buffer - Schedule LinkedIn Post": {
+            "main": [
+                [
+                    {
+                        "node": "Buffer - Schedule Twitter Post",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Buffer - Schedule Twitter Post": {
+            "main": [
+                [
+                    {
+                        "node": "Airtable - Log Content Calendar",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Airtable - Log Content Calendar": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - Content Preview for Approval",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
