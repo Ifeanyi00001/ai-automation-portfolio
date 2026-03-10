@@ -1,0 +1,504 @@
+{
+    "name": "Multilingual Contract Compliance Monitor",
+    "nodes": [
+        {
+            "id": "p2-n1",
+            "name": "Schedule Trigger",
+            "type": "n8n-nodes-base.scheduleTrigger",
+            "typeVersion": 1,
+            "position": [
+                0,
+                0
+            ],
+            "parameters": {
+                "rule": {
+                    "interval": [
+                        {
+                            "field": "minutes",
+                            "minutesInterval": 5
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p2-n2",
+            "name": "List Contracts in Drive",
+            "type": "n8n-nodes-base.googleDrive",
+            "typeVersion": 3,
+            "position": [
+                220,
+                0
+            ],
+            "parameters": {
+                "operation": "list",
+                "resource": "fileFolder"
+            }
+        },
+        {
+            "id": "p2-n3",
+            "name": "Download Contract PDF",
+            "type": "n8n-nodes-base.googleDrive",
+            "typeVersion": 3,
+            "position": [
+                440,
+                0
+            ],
+            "parameters": {
+                "operation": "download",
+                "resource": "file"
+            }
+        },
+        {
+            "id": "p2-n4",
+            "name": "LlamaParse - Upload Contract",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                660,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.cloud.llamaindex.ai/api/parsing/upload",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{LLAMAPARSE_API_KEY}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "multipart-form-data",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "parameterType": "formBinaryData",
+                            "name": "file",
+                            "inputDataFieldName": "data"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p2-n5",
+            "name": "Wait 20s for Parse",
+            "type": "n8n-nodes-base.wait",
+            "typeVersion": 1,
+            "position": [
+                880,
+                0
+            ],
+            "webhookId": "p2-contract-wait",
+            "parameters": {
+                "amount": 20,
+                "unit": "seconds"
+            }
+        },
+        {
+            "id": "p2-n6",
+            "name": "Fetch Parsed Contract Text",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1100,
+                0
+            ],
+            "parameters": {
+                "url": "=https://api.cloud.llamaindex.ai/api/parsing/job/{{ $('LlamaParse - Upload Contract').item.json.id }}/result/markdown",
+                "method": "GET",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer {{LLAMAPARSE_API_KEY}}"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p2-n7",
+            "name": "DeepL - Translate to English",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1320,
+                0
+            ],
+            "parameters": {
+                "url": "https://api-free.deepl.com/v2/translate",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "Authorization",
+                            "value": "DeepL-Auth-Key {{DEEPL_API_KEY}}"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "form-urlencoded",
+                "bodyParameters": {
+                    "parameters": [
+                        {
+                            "name": "text",
+                            "value": "={{ $json.markdown }}"
+                        },
+                        {
+                            "name": "target_lang",
+                            "value": "EN-US"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p2-n8",
+            "name": "Normalize Text",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1540,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const t = $input.item.json.translations?.[0];\nconst contractText = t?.text || $input.item.json.markdown || '';\nconst lang = t?.detected_source_language || 'EN';\nreturn { json: { contractText, detectedLanguage: lang, wasTranslated: lang !== 'EN', charCount: contractText.length } };"
+            }
+        },
+        {
+            "id": "p2-n9",
+            "name": "Claude - Analyze Risk Clauses",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1760,
+                0
+            ],
+            "parameters": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "method": "POST",
+                "sendHeaders": true,
+                "headerParameters": {
+                    "parameters": [
+                        {
+                            "name": "x-api-key",
+                            "value": "{{ANTHROPIC_API_KEY}}"
+                        },
+                        {
+                            "name": "anthropic-version",
+                            "value": "2023-06-01"
+                        },
+                        {
+                            "name": "content-type",
+                            "value": "application/json"
+                        }
+                    ]
+                },
+                "sendBody": true,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                "body": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 4000, temperature: 0.1, system: 'You are a senior contract attorney specializing in international commercial law. Identify high-risk clauses precisely, cite exact paragraph numbers, and be concise.', messages: [{ role: 'user', content: 'Analyze for 10 HIGH-RISK clause categories: 1.Non-Compete 2.Unlimited Liability 3.Indemnification 4.Auto-Renewal 5.IP Ownership 6.Termination-for-Convenience 7.Governing Law 8.Confidentiality 9.Force Majeure 10.Payment Terms. For each: State PRESENT/MISSING/AGGRESSIVE, cite exact section, 1-2 sentence risk explanation, rate LOW/MEDIUM/HIGH/CRITICAL. End with OVERALL RISK SCORE: X/100. CONTRACT: ' + $json.contractText }] }) }}"
+            }
+        },
+        {
+            "id": "p2-n10",
+            "name": "Parse Risk Score",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                1980,
+                0
+            ],
+            "parameters": {
+                "jsCode": "const r = $input.item.json.content?.[0]?.text || '';\nconst m = r.match(/OVERALL RISK SCORE[:\\s]+(\\d+)/i);\nconst s = m ? parseInt(m[1]) : 50;\nlet l, e;\nif (s >= 75) { l = 'CRITICAL'; e = ':rotating_light:'; }\nelse if (s >= 50) { l = 'HIGH'; e = ':warning:'; }\nelse if (s >= 25) { l = 'MEDIUM'; e = ':large_yellow_circle:'; }\nelse { l = 'LOW'; e = ':white_check_mark:'; }\nreturn { json: { riskScore: s, riskLevel: l, emoji: e, criticalCount: (r.match(/CRITICAL/gi)||[]).length, highCount: (r.match(/\\bHIGH\\b/gi)||[]).length, missingCount: (r.match(/MISSING/gi)||[]).length, aggressiveCount: (r.match(/AGGRESSIVE/gi)||[]).length, rawAnalysis: r, slackPreview: r.substring(0, 600), generatedAt: new Date().toISOString() } };"
+            }
+        },
+        {
+            "id": "p2-n11",
+            "name": "Risk Gate",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 2,
+            "position": [
+                2200,
+                0
+            ],
+            "parameters": {
+                "conditions": {
+                    "conditions": [
+                        {
+                            "leftValue": "={{ $json.riskScore }}",
+                            "rightValue": 25,
+                            "operator": {
+                                "type": "number",
+                                "operation": "gt"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "id": "p2-n12",
+            "name": "Slack - High Risk Alert",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                -120
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "legal-compliance"
+                },
+                "text": "={{ $json.emoji }} *CONTRACT COMPLIANCE ALERT*\n*Risk Level:* {{ $json.riskLevel }} ({{ $json.riskScore }}/100)\n*Findings:* Critical: {{ $json.criticalCount }} | High: {{ $json.highCount }} | Missing: {{ $json.missingCount }}\n\n*Preview:*\n```{{ $json.slackPreview }}```",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p2-n13",
+            "name": "Slack - Low Risk Log",
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2,
+            "position": [
+                2420,
+                120
+            ],
+            "parameters": {
+                "select": "channel",
+                "channelId": {
+                    "mode": "name",
+                    "value": "legal-compliance"
+                },
+                "text": "=:white_check_mark: LOW RISK CONTRACT logged. Score: {{ $('Parse Risk Score').item.json.riskScore }}/100",
+                "otherOptions": {}
+            }
+        },
+        {
+            "id": "p2-n14",
+            "name": "Save to Google Docs",
+            "type": "n8n-nodes-base.googleDocs",
+            "typeVersion": 1,
+            "position": [
+                2640,
+                -120
+            ],
+            "parameters": {
+                "operation": "create",
+                "title": "=Compliance Report - {{ $('Parse Risk Score').item.json.riskLevel }} Risk - {{ $('Parse Risk Score').item.json.generatedAt }}"
+            }
+        },
+        {
+            "id": "p2-n15",
+            "name": "Gmail Trigger",
+            "type": "n8n-nodes-base.gmailTrigger",
+            "typeVersion": 1,
+            "position": [
+                220,
+                220
+            ],
+            "parameters": {
+                "pollTimes": {
+                    "item": [
+                        {
+                            "mode": "everyMinute"
+                        }
+                    ]
+                },
+                "filters": {
+                    "q": "has:attachment subject:contract"
+                },
+                "options": {
+                    "downloadAttachments": true,
+                    "dataPropertyAttachmentsPrefixName": "attachment_"
+                }
+            }
+        },
+        {
+            "id": "p2-n16",
+            "name": "Format Attachment",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [
+                440,
+                220
+            ],
+            "parameters": {
+                "jsCode": "for (const item of $input.all()) {\n  if (item.binary && item.binary.attachment_0) {\n    item.binary.data = item.binary.attachment_0;\n    delete item.binary.attachment_0;\n  }\n}\nreturn $input.all();"
+            }
+        }
+    ],
+    "connections": {
+        "Schedule Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "List Contracts in Drive",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "List Contracts in Drive": {
+            "main": [
+                [
+                    {
+                        "node": "Download Contract PDF",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Download Contract PDF": {
+            "main": [
+                [
+                    {
+                        "node": "LlamaParse - Upload Contract",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "LlamaParse - Upload Contract": {
+            "main": [
+                [
+                    {
+                        "node": "Wait 20s for Parse",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Gmail Trigger": {
+            "main": [
+                [
+                    {
+                        "node": "Format Attachment",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Format Attachment": {
+            "main": [
+                [
+                    {
+                        "node": "LlamaParse - Upload Contract",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Wait 20s for Parse": {
+            "main": [
+                [
+                    {
+                        "node": "Fetch Parsed Contract Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Fetch Parsed Contract Text": {
+            "main": [
+                [
+                    {
+                        "node": "DeepL - Translate to English",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "DeepL - Translate to English": {
+            "main": [
+                [
+                    {
+                        "node": "Normalize Text",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Normalize Text": {
+            "main": [
+                [
+                    {
+                        "node": "Claude - Analyze Risk Clauses",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Claude - Analyze Risk Clauses": {
+            "main": [
+                [
+                    {
+                        "node": "Parse Risk Score",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Parse Risk Score": {
+            "main": [
+                [
+                    {
+                        "node": "Risk Gate",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Risk Gate": {
+            "main": [
+                [
+                    {
+                        "node": "Slack - High Risk Alert",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Slack - Low Risk Log",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Slack - High Risk Alert": {
+            "main": [
+                [
+                    {
+                        "node": "Save to Google Docs",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}
